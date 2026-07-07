@@ -1,0 +1,69 @@
+# -*- coding: utf-8 -*-
+import logging
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters,
+)
+from config import BOT_TOKEN
+from storage import migrate_days
+from handlers import (
+    start, handle_message, handle_day_selection, participants, unlock,
+    handle_menu_competition, handle_menu_credit, handle_menu_balance,
+    handle_hint, handle_back_to_main, handle_back_to_days,
+    handle_notif_user, handle_notif_tlog, handle_notif_results,
+)
+from admin import build_admin_handler
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN is not set.")
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is missing.")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Notification button handlers — registered first so they always fire
+    # regardless of admin ConversationHandler state
+    app.add_handler(CallbackQueryHandler(handle_notif_user,    pattern=r"^notif_user_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_notif_tlog,    pattern=r"^notif_tlog_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_notif_results, pattern=r"^notif_results_\d+$"))
+
+    # Admin ConversationHandler
+    app.add_handler(build_admin_handler())
+
+    # Regular user commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("participants", participants))
+    app.add_handler(CommandHandler("unlock", unlock))
+
+    # Main menu buttons
+    app.add_handler(CallbackQueryHandler(handle_menu_competition, pattern="^menu_competition$"))
+    app.add_handler(CallbackQueryHandler(handle_menu_credit,      pattern="^menu_credit$"))
+    app.add_handler(CallbackQueryHandler(handle_menu_balance,     pattern="^menu_balance$"))
+
+    # Hint button
+    app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))
+
+    # Back navigation
+    app.add_handler(CallbackQueryHandler(handle_back_to_main, pattern="^back_to_main$"))
+    app.add_handler(CallbackQueryHandler(handle_back_to_days, pattern="^back_to_days$"))
+
+    # Day selection
+    app.add_handler(CallbackQueryHandler(handle_day_selection, pattern=r"^day_\d+$"))
+
+    # General text messages
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    migrate_days()   # one-time migration: passwords/prompts → stages
+    logger.info("Bot is starting…")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
