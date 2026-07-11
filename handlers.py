@@ -32,7 +32,7 @@ ENCOURAGEMENTS = [
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏆 الدخول للمسابقة", callback_data="menu_competition")],
+        [InlineKeyboardButton("🏆 مسابقة الكلمات", callback_data="menu_competition")],
         [InlineKeyboardButton("💳 شحن الرصيد",      callback_data="menu_credit"),
          InlineKeyboardButton("💰 معرفة الرصيد",    callback_data="menu_balance")],
         [InlineKeyboardButton("🏆 لوحة الشرف",      callback_data="menu_leaderboard")],
