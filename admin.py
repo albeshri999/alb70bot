@@ -1666,12 +1666,9 @@ async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
     from storage import get_user as _gu
     user    = _gu(int(uid))
     balance = user.get("credits", 0)
-
-# السماح بأن يصبح الرصيد بالسالب
-deducted = amount
-new_bal = balance - amount
-
-update_user(int(uid), credits=new_bal)
+    deducted = amount
+    new_bal = balance - amount
+    update_user(int(uid), credits=new_bal)
     log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "remove", deducted, new_bal)
     try:
         from transactions import record as _rec
