@@ -71,12 +71,47 @@ def create_quiz(name: str, description: str, points_per_question: int,
         "timed": bool(timed),
         "time_minutes": time_minutes if timed else None,
         "visible": bool(visible),
+        # The countdown clock (for timed quizzes) is anchored to the moment
+        # the quiz becomes visible to participants — NOT to when a given
+        # participant taps "بدء الاختبار". See set_quiz_visible() below.
+        "opened_at": datetime.utcnow().isoformat() if visible else None,
         "show_score": True,
         "allow_retake": False,
         "questions": [],
         "created_at": datetime.utcnow().isoformat(),
     })
     return quiz_id
+
+
+def set_quiz_visible(quiz_id, visible: bool) -> None:
+    """Show/hide a quiz. Turning it ON (re)starts its countdown clock — this
+    is the single moment 'opened_at' is stamped, so every participant shares
+    the same deadline regardless of when they personally open the quiz."""
+    quiz = get_quiz(quiz_id)
+    if not quiz:
+        return
+    quiz["visible"] = bool(visible)
+    if visible:
+        quiz["opened_at"] = datetime.utcnow().isoformat()
+    save_quiz(quiz_id, quiz)
+
+
+def remaining_seconds(quiz: dict):
+    """Seconds left until a timed quiz closes, based on 'opened_at' + time_minutes.
+    Returns None if the quiz isn't timed (untimed quizzes are unaffected —
+    they keep working exactly as before)."""
+    if not quiz or not quiz.get("timed"):
+        return None
+    opened_at = quiz.get("opened_at")
+    minutes   = quiz.get("time_minutes") or 0
+    if not opened_at:
+        return None
+    try:
+        started = datetime.fromisoformat(opened_at)
+    except Exception:
+        return None
+    deadline = started.timestamp() + minutes * 60
+    return int(deadline - datetime.utcnow().timestamp())
 
 
 def delete_quiz(quiz_id) -> bool:

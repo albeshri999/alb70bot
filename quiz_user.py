@@ -6,6 +6,18 @@ Fully independent of the word-competition flow in handlers.py:
 - Uses its own storage (quiz_storage.py).
 - Every interaction here is a button tap (no free-text state), so it never
   touches the existing handle_message() text-state router.
+
+Timed-quiz behavior:
+- For a timed quiz, the clock starts the moment the ADMIN makes the quiz
+  visible (quiz["opened_at"], stamped by quiz_storage.set_quiz_visible /
+  create_quiz) — not when a participant taps "بدء الاختبار". Every
+  participant therefore shares the same closing time.
+- While a participant is on a question, a live "⏳ الوقت المتبقي" countdown
+  is kept up to date via a repeating JobQueue job that edits the message.
+- If time runs out (whether before the participant even starts, or mid-quiz,
+  or exactly when they submit an answer), the attempt is closed immediately,
+  NO score is calculated, and NOTHING is recorded in the results.
+- Quizzes without a time limit are completely unaffected by any of this.
 """
 import logging
 from datetime import datetime
@@ -20,6 +32,12 @@ import quiz_storage as qs
 logger = logging.getLogger(__name__)
 
 BACK_TO_MAIN = "back_to_main"  # reuse the existing main-menu back callback
+TIMER_TICK_SECONDS = 5         # how often the live countdown message is refreshed
+
+EXPIRED_MSG = (
+    "⏰ انتهى وقت الاختبار قبل تسليم الإجابة.\n\n"
+    "لم يتم احتساب درجتك."
+)
 
 
 def _back_kb(callback: str, label: str = "🔙 رجوع") -> InlineKeyboardMarkup:
@@ -40,21 +58,87 @@ def _total_points(quiz: dict) -> int:
     return len(quiz.get("questions", [])) * int(quiz.get("points_per_question", 0))
 
 
-def _format_duration(seconds: int) -> str:
-    seconds = max(0, int(seconds))
+def _fmt_timer(seconds) -> str:
+    seconds = max(0, int(seconds or 0))
     m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    parts = []
-    if h:
-        parts.append(f"{h} ساعة")
-    if m:
-        parts.append(f"{m} دقيقة")
-    if s or not parts:
-        parts.append(f"{s} ثانية")
-    return " و ".join(parts)
+    return f"{m:02d}:{s:02d}"
 
 
-# ── Menu: list of visible quizzes ─────────────────────────────────────────────
+def _timer_job_name(user_id: int) -> str:
+    return f"qz_timer_{user_id}"
+
+
+def _cancel_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    jq = context.job_queue
+    if not jq:
+        return
+    for job in jq.get_jobs_by_name(_timer_job_name(user_id)):
+        job.schedule_removal()
+
+
+def _schedule_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int,
+                     chat_id: int, message_id: int) -> None:
+    _cancel_timer(context, user_id)
+    jq = context.job_queue
+    if not jq:
+        logger.warning("job_queue unavailable - live quiz countdown disabled.")
+        return
+    jq.run_repeating(
+        _timer_tick,
+        interval=TIMER_TICK_SECONDS,
+        first=TIMER_TICK_SECONDS,
+        data={"user_id": user_id, "chat_id": chat_id, "message_id": message_id},
+        name=_timer_job_name(user_id),
+    )
+
+
+async def _timer_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job     = context.job
+    data    = job.data
+    user_id = data["user_id"]
+
+    session = qs.get_session(user_id)
+    if not session:
+        job.schedule_removal()
+        return
+
+    quiz = qs.get_quiz(session.get("quiz_id"))
+    if not quiz or not quiz.get("timed"):
+        job.schedule_removal()
+        return
+
+    remaining = qs.remaining_seconds(quiz)
+    if remaining is None:
+        job.schedule_removal()
+        return
+
+    if remaining <= 0:
+        job.schedule_removal()
+        qs.end_session(user_id)  # expired - no score, nothing recorded
+        try:
+            await context.bot.edit_message_text(
+                chat_id=data["chat_id"], message_id=data["message_id"],
+                text=EXPIRED_MSG, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_back_kb("menu_quizzes"),
+            )
+        except Exception as e:
+            logger.warning("quiz timer expiry edit failed: %s", e)
+        return
+
+    index = session.get("current_index", 0)
+    if index >= len(quiz.get("questions", [])):
+        job.schedule_removal()
+        return
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=data["chat_id"], message_id=data["message_id"],
+            text=_question_text(quiz, index, remaining),
+            parse_mode=ParseMode.MARKDOWN, reply_markup=_question_kb(),
+        )
+    except Exception as e:
+        logger.debug("quiz timer tick edit skipped: %s", e)
+
 
 async def handle_menu_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -72,8 +156,6 @@ async def handle_menu_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=BACK_TO_MAIN)])
     await _edit(update, "📝 *الاختبارات المتاحة*\n\nاختر اختباراً:", InlineKeyboardMarkup(rows))
 
-
-# ── Quiz info screen ──────────────────────────────────────────────────────────
 
 async def handle_quiz_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query   = update.callback_query
@@ -95,13 +177,24 @@ async def handle_quiz_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    n_q     = len(quiz.get("questions", []))
-    total   = _total_points(quiz)
-    time_line = f"⏱ الوقت: *{quiz.get('time_minutes')}* دقيقة" if quiz.get("timed") else "⏱ الوقت: بدون تحديد"
-    desc    = quiz.get("description") or ""
-    lines = [
-        f"📝 *{quiz.get('name')}*",
-    ]
+    remaining = qs.remaining_seconds(quiz)  # None if untimed
+    if remaining is not None and remaining <= 0:
+        await _edit(
+            update,
+            f"📝 *{quiz.get('name')}*\n\n"
+            "⏰ انتهى وقت هذا الاختبار، ولم يعد بالإمكان البدء به.",
+            _back_kb("menu_quizzes"),
+        )
+        return
+
+    n_q   = len(quiz.get("questions", []))
+    total = _total_points(quiz)
+    if remaining is not None:
+        time_line = f"⏳ الوقت المتبقي حتى إغلاق الاختبار: *{_fmt_timer(remaining)}*"
+    else:
+        time_line = "⏱ الوقت: بدون تحديد"
+    desc  = quiz.get("description") or ""
+    lines = [f"📝 *{quiz.get('name')}*"]
     if desc:
         lines.append(f"_{desc}_")
     lines += [
@@ -121,8 +214,6 @@ async def handle_quiz_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _edit(update, "\n".join(lines), kb)
 
 
-# ── Starting / running the quiz ───────────────────────────────────────────────
-
 def _question_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("أ", callback_data="qz_ans_a"),
@@ -130,10 +221,12 @@ def _question_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def _question_text(quiz: dict, index: int) -> str:
+def _question_text(quiz: dict, index: int, remaining=None) -> str:
     q = quiz["questions"][index]
     n = len(quiz["questions"])
+    header = f"⏳ الوقت المتبقي:\n*{_fmt_timer(remaining)}*\n\n" if remaining is not None else ""
     return (
+        f"{header}"
         f"📝 *{quiz.get('name')}*  —  السؤال {index + 1}/{n}\n\n"
         f"{q.get('question', '')}\n\n"
         f"أ) {q.get('option_a', '')}\n"
@@ -154,12 +247,24 @@ async def handle_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer("✅ لقد قمت بحل هذا الاختبار مسبقاً.", show_alert=True)
         return
 
+    remaining = qs.remaining_seconds(quiz)
+    if remaining is not None and remaining <= 0:
+        await query.answer("⏰ انتهى وقت هذا الاختبار.", show_alert=True)
+        await _edit(update, EXPIRED_MSG, _back_kb("menu_quizzes"))
+        return
+
     await query.answer()
     qs.start_session(user_id, quiz_id)
-    await _edit(update, _question_text(quiz, 0), _question_kb())
+    await _edit(update, _question_text(quiz, 0, remaining), _question_kb())
+
+    if remaining is not None:
+        _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)
 
 
-async def _finish_quiz(update: Update, user_id: int, quiz: dict, session: dict) -> None:
+async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        user_id: int, quiz: dict, session: dict) -> None:
+    _cancel_timer(context, user_id)
+
     quiz_id       = session["quiz_id"]
     n_q           = len(quiz.get("questions", []))
     correct_count = session.get("correct_count", 0)
@@ -205,6 +310,13 @@ async def _finish_quiz(update: Update, user_id: int, quiz: dict, session: dict) 
     await _edit(update, text, _back_kb("menu_quizzes"))
 
 
+async def _expire_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """Time ran out - close the attempt with NO score and NO recorded result."""
+    _cancel_timer(context, user_id)
+    qs.end_session(user_id)
+    await _edit(update, EXPIRED_MSG, _back_kb("menu_quizzes"))
+
+
 async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query   = update.callback_query
     user_id = query.from_user.id
@@ -218,28 +330,22 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     quiz_id = session["quiz_id"]
     quiz    = qs.get_quiz(quiz_id)
     if not quiz or not quiz.get("questions"):
+        _cancel_timer(context, user_id)
         qs.end_session(user_id)
         await query.answer("⚠️ حدث خطأ في الاختبار.", show_alert=True)
         return
 
     await query.answer()
 
-    # Time-limit check — if the allotted time has already elapsed, grade
-    # whatever was answered so far and end the attempt now.
-    if quiz.get("timed"):
-        try:
-            started = datetime.fromisoformat(session["started_at"])
-            elapsed = (datetime.utcnow() - started).total_seconds()
-        except Exception:
-            elapsed = 0
-        if elapsed > int(quiz.get("time_minutes", 0)) * 60:
-            await _finish_quiz(update, user_id, quiz, session)
-            return
+    remaining = qs.remaining_seconds(quiz)
+    if remaining is not None and remaining <= 0:
+        await _expire_quiz(update, context, user_id)
+        return
 
     questions = quiz["questions"]
     index     = session.get("current_index", 0)
     if index >= len(questions):
-        await _finish_quiz(update, user_id, quiz, session)
+        await _finish_quiz(update, context, user_id, quiz, session)
         return
 
     correct_choice = questions[index].get("correct")
@@ -255,7 +361,9 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     if next_index >= len(questions):
-        await _finish_quiz(update, user_id, quiz, session)
+        await _finish_quiz(update, context, user_id, quiz, session)
         return
 
-    await _edit(update, _question_text(quiz, next_index), _question_kb())
+    await _edit(update, _question_text(quiz, next_index, remaining), _question_kb())
+    if remaining is not None:
+        _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)

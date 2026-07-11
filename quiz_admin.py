@@ -203,7 +203,7 @@ async def qa_toggle_visible(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     quiz_id = context.user_data.get("qa_quiz_id")
     quiz    = qs.get_quiz(quiz_id)
-    qs.update_quiz_field(quiz_id, visible=not quiz.get("visible"))
+    qs.set_quiz_visible(quiz_id, not quiz.get("visible"))
     return await _show_quiz_menu(update, context)
 
 

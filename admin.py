@@ -1667,14 +1667,16 @@ async def credit_remove_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             reason: str):
-    """Perform the deduction, log it, and notify the player."""
+    """Perform the deduction, log it, and notify the player.
+    The deduction always applies in full, regardless of the current balance —
+    the balance is allowed to go negative (no floor at zero)."""
     uid    = context.user_data.get("credit_uid")
     amount = context.user_data.pop("credit_remove_amount", 0)
     from storage import get_user as _gu
     user    = _gu(int(uid))
     balance = user.get("credits", 0)
-    deducted = min(amount, balance)
-    new_bal  = balance - deducted
+    deducted = amount
+    new_bal  = balance - amount
     update_user(int(uid), credits=new_bal)
     log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "remove", deducted, new_bal)
     try:
@@ -1687,7 +1689,8 @@ async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as _e:
         logger.warning("transaction record failed: %s", _e)
 
-    # Notify the player immediately.
+    # Notify the player immediately — always show the true new balance,
+    # even if it's now negative.
     try:
         reason_line = f"\n\nالسبب:\n{reason}" if reason else ""
         await context.bot.send_message(
@@ -1702,9 +1705,8 @@ async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except Exception as _e:
         logger.warning("Player penalty notification failed: %s", _e)
 
-    note = f" (الرصيد كان {balance} فقط)" if deducted < amount else ""
     return await _show_credit_user(update, uid, context,
-                                   prefix=f"✅ تم خصم *{deducted}* نقطة.{note}")
+                                   prefix=f"✅ تم خصم *{deducted}* نقطة.")
 
 
 async def credit_remove_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
