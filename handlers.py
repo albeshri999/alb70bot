@@ -445,13 +445,50 @@ async def _handle_password(update: Update, user_id: int, text: str,
             int((user.get("word_reveals", {}) or {}).get(_ws_key(day_key, step), 0)),
         )
         reward_blocked = revealed_count < MIN_REVEALS_FOR_REWARD
-        reward_text    = ""
-        if reward_blocked:
-            reward_text = "\n\n⚠️ تم حجب نقاط هذه الكلمة لوجود استعانة خارجية."
-        else:
-            bal_before = get_balance(user_id)
-            new_bal    = add_credits(user_id, WORD_REWARD)
-            reward_text = f"\n\n🎁 تمت إضافة *{WORD_REWARD}* نقاط لرصيدك."
+       meaning = day_data["stages"][step].get("meaning", "")
+
+encouragement = random.choice([
+    "🎉 أحسنت!",
+    "👏 بارك الله فيك!",
+    "🌟 ممتاز!",
+    "💪 إجابة موفقة!",
+    "🏆 رائع، استمر!",
+    "✨ أحسنت وأبدعت!"
+])
+
+if reward_blocked:
+    reward_text = (
+        f"{encouragement}\n\n"
+        "✅ إجابتك صحيحة.\n\n"
+        f"📖 الكلمة:\n{day_data['stages'][step]['answer']}\n\n"
+        f"📚 معناها:\n{meaning}\n\n"
+        "⚠️ تم حجب نقاط هذه الكلمة لوجود استعانة خارجية."
+    )
+else:
+    bal_before = get_balance(user_id)
+    new_bal = add_credits(user_id, WORD_REWARD)
+
+    try:
+        from transactions import record as _rec
+        _rec(
+            user_id,
+            user.get("full_name", "—"),
+            "word_reward",
+            WORD_REWARD,
+            bal_before,
+            new_bal,
+            f"مكافأة فتح الكلمة {stage_ordinal(step)}",
+        )
+    except Exception as _e:
+        logger.warning("transaction record failed: %s", _e)
+
+    reward_text = (
+        f"{encouragement}\n\n"
+        "✅ إجابتك صحيحة.\n\n"
+        f"📖 الكلمة:\n{day_data['stages'][step]['answer']}\n\n"
+        f"📚 معناها:\n{meaning}\n\n"
+        f"🏆 تمت إضافة {WORD_REWARD} نقاط إلى رصيدك."
+    )
             try:
                 from transactions import record as _rec
                 _rec(user_id, user.get("full_name", "—"),
@@ -511,9 +548,12 @@ async def _handle_password(update: Update, user_id: int, text: str,
             ptext = _prompt_text(day_data, next_step, get_user(user_id))
             req   = _next_letter_requirement(day_key, next_step, 0)
             await update.message.reply_text(
-                f"✅ صحيح!{reward_text}\n\n{ptext}",
-                reply_markup=_hint_kb(req),
-                parse_mode=ParseMode.MARKDOWN,
+    f"{reward_text}\n\n"
+    "➡️ اضغط «الكلمة التالية» للمتابعة.",
+    reply_markup=_next_word_kb(),
+    parse_mode=ParseMode.MARKDOWN,
+)
+               
             )
             if context:
                 try:
