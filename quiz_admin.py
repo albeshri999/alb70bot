@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import ADMIN_ID
+import admins_store
 from storage import get_user
 import quiz_storage as qs
 
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
+    return admins_store.is_admin(uid)
 
 
 def _md(text: str) -> str:
@@ -93,6 +93,10 @@ def _hub_kb() -> InlineKeyboardMarkup:
 
 
 async def qa_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ ليس لديك صلاحية.", show_alert=True)
+        return ConversationHandler.END
     if update.callback_query:
         await update.callback_query.answer()
     context.user_data.pop("qa_quiz_id", None)

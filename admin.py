@@ -14,7 +14,7 @@ from telegram.constants import ParseMode
 from storage import (load_users, load_days, save_days, update_user, load_codes, save_codes,
                      get_hint_cost, set_hint_cost, load_credit_log, log_credit_action)
 from credits import generate_codes, add_credits, get_balance, normalize_code
-from config import ADMIN_ID
+import admins_store
 from utils import default_question, stage_ordinal
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
+    return admins_store.is_admin(uid)
 
 
 def _md(text: str) -> str:
@@ -558,7 +558,7 @@ async def part_rename_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "date":      now.strftime("%d/%m/%Y"),
         "time":      now.strftime("%H:%M:%S"),
         "timestamp": now.isoformat(),
-        "admin_id":  ADMIN_ID,
+        "admin_id":  update.effective_user.id,
         "user_id":   uid,
         "old_name":  old_name,
         "new_name":  new_name,
@@ -1622,7 +1622,7 @@ async def credit_add_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user       = _gu(int(uid))
     bal_before = user.get("credits", 0)
     new_bal    = add_credits(int(uid), amount)
-    log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "add", amount, new_bal)
+    log_credit_action(update.effective_user.id, uid, user.get("full_name", "—"), "add", amount, new_bal)
     try:
         from transactions import record as _rec
         _rec(int(uid), user.get("full_name", "—"),
@@ -1678,7 +1678,7 @@ async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
     deducted = amount
     new_bal  = balance - amount
     update_user(int(uid), credits=new_bal)
-    log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "remove", deducted, new_bal)
+    log_credit_action(update.effective_user.id, uid, user.get("full_name", "—"), "remove", deducted, new_bal)
     try:
         from transactions import record as _rec
         desc = f"خصم {deducted} نقطة بواسطة المشرف"
@@ -1744,7 +1744,7 @@ async def credit_reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
     user    = _gu(int(uid))
     old_bal = user.get("credits", 0)
     update_user(int(uid), credits=0)
-    log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "reset", old_bal, 0)
+    log_credit_action(update.effective_user.id, uid, user.get("full_name", "—"), "reset", old_bal, 0)
     try:
         from transactions import record as _rec
         _rec(int(uid), user.get("full_name", "—"),

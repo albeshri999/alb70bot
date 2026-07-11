@@ -18,6 +18,7 @@ from quiz_admin import build_quiz_admin_handler
 from quiz_user import (
     handle_menu_quizzes, handle_quiz_view, handle_quiz_start, handle_quiz_answer,
 )
+from admin_management import add_admin_cmd, remove_admin_cmd, list_admins_cmd
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -49,6 +50,11 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("participants", participants))
     app.add_handler(CommandHandler("unlock", unlock))
+
+    # Multi-admin management (owner-only add/remove, any-admin list)
+    app.add_handler(CommandHandler("addadmin", add_admin_cmd))
+    app.add_handler(CommandHandler("removeadmin", remove_admin_cmd))
+    app.add_handler(CommandHandler("admins", list_admins_cmd))
 
     # Main menu buttons
     app.add_handler(CallbackQueryHandler(handle_menu_competition, pattern="^menu_competition$"))

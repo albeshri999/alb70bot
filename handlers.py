@@ -10,6 +10,7 @@ from storage import (get_user, create_user, update_user, load_days, load_users,
                       get_day_open)
 from auth import check_password, is_locked
 from config import ADMIN_ID
+import admins_store
 from credits import get_balance, add_credits, redeem_code, hint_mask
 from utils import get_stage_question, get_stage_answer, get_stage_meaning, default_question, stage_ordinal
 
@@ -668,7 +669,7 @@ async def _send_admin_notification(context: ContextTypes.DEFAULT_TYPE,
 async def handle_notif_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show quick participant summary when admin taps notification button."""
     query = update.callback_query
-    if query.from_user.id != ADMIN_ID:
+    if not admins_store.is_admin(query.from_user.id):
         await query.answer("⛔", show_alert=True)
         return
     await query.answer()
@@ -701,7 +702,7 @@ async def handle_notif_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def handle_notif_tlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show last 5 transactions for the participant."""
     query = update.callback_query
-    if query.from_user.id != ADMIN_ID:
+    if not admins_store.is_admin(query.from_user.id):
         await query.answer("⛔", show_alert=True)
         return
     await query.answer()
@@ -727,7 +728,7 @@ async def handle_notif_tlog(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def handle_notif_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show completion results for the day."""
     query = update.callback_query
-    if query.from_user.id != ADMIN_ID:
+    if not admins_store.is_admin(query.from_user.id):
         await query.answer("⛔", show_alert=True)
         return
     await query.answer()
@@ -1023,7 +1024,7 @@ async def handle_back_to_days(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+    if not admins_store.is_admin(user_id):
         await update.message.reply_text("❌ ليس لديك صلاحية لاستخدام هذا الأمر.")
         return
     if not context.args:
@@ -1050,7 +1051,7 @@ async def unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def participants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+    if not admins_store.is_admin(user_id):
         await update.message.reply_text("❌ ليس لديك صلاحية لاستخدام هذا الأمر.")
         return
     users = load_users()
