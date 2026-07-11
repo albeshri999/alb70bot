@@ -98,6 +98,35 @@ def set_leaderboard_count(count: int) -> None:
     save_config(cfg)
 
 
+def get_notify_word_open() -> bool:
+    """Whether the admin should be notified whenever a player opens a word.
+    Defaults to True to preserve the bot's original behavior."""
+    return bool(load_config().get("notify_word_open", True))
+
+
+def set_notify_word_open(enabled: bool) -> None:
+    cfg = load_config()
+    cfg["notify_word_open"] = bool(enabled)
+    save_config(cfg)
+
+
+def get_day_open(day_key: str) -> bool:
+    """Whether a competition day is open for participants to enter.
+    Defaults to True (open) so existing days keep working as before,
+    unless the admin explicitly closes them."""
+    days = load_days()
+    d = days.get(str(day_key), {})
+    return bool(d.get("open", True))
+
+
+def set_day_open(day_key: str, enabled: bool) -> None:
+    days = load_days()
+    key = str(day_key)
+    if key in days:
+        days[key]["open"] = bool(enabled)
+        save_days(days)
+
+
 def load_credit_log() -> list:
     return _load_json(CREDIT_LOG_FILE, [])
 

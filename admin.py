@@ -52,7 +52,11 @@ logger = logging.getLogger(__name__)
  PART_RENAME,
  # Leaderboard settings
  LB_MENU, LB_COUNT_CUSTOM,
- ) = range(46)
+ # Word-open notifications toggle
+ NOTIF_MENU,
+ # Competition days open/closed status manager
+ DAYS_TOGGLE_LIST, DAYS_TOGGLE_DAY,
+ ) = range(49)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -92,8 +96,10 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 الإحصائيات",           callback_data="adm_stats"),
          InlineKeyboardButton("📤 تصدير Excel",          callback_data="adm_export")],
         [InlineKeyboardButton("📅 إدارة المسابقات",      callback_data="adm_manage_days")],
+        [InlineKeyboardButton("📅 إدارة أيام المسابقة",  callback_data="adm_days_toggle")],
         [InlineKeyboardButton("➕ إضافة يوم جديد",      callback_data="adm_add_day"),
          InlineKeyboardButton("🗑 حذف يوم",              callback_data="adm_delete_day")],
+        [InlineKeyboardButton("🔔 إشعارات فتح الكلمات",  callback_data="adm_notif_toggle")],
         [InlineKeyboardButton("🔄 إعادة تعيين النتائج", callback_data="adm_reset")],
         [InlineKeyboardButton("📢 إذاعة رسالة",          callback_data="adm_broadcast")],
         [InlineKeyboardButton("💳 إدارة أكواد الشحن",    callback_data="adm_codes")],
@@ -2125,6 +2131,135 @@ async def lb_count_custom_handler(update: Update, context: ContextTypes.DEFAULT_
     return LB_MENU
 
 
+# ── Word-open notifications toggle ────────────────────────────────────────────
+
+def _notif_status_text() -> str:
+    from storage import get_notify_word_open
+    enabled = get_notify_word_open()
+    status  = "✅ مفعلة" if enabled else "❌ معطلة"
+    return f"🔔 *إشعارات فتح الكلمات*\n\nالحالة الحالية: {status}"
+
+
+def _notif_kb() -> InlineKeyboardMarkup:
+    from storage import get_notify_word_open
+    enabled = get_notify_word_open()
+    label   = "⏸ إيقاف" if enabled else "▶️ تفعيل"
+    cb      = "notif_disable" if enabled else "notif_enable"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=cb)],
+        [InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")],
+    ])
+
+
+async def cb_notif_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update, _notif_status_text(), _notif_kb())
+    return NOTIF_MENU
+
+
+async def cb_notif_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_notify_word_open
+    set_notify_word_open(True)
+    await update.callback_query.answer("✅ تم تفعيل الإشعارات.")
+    await _reply(update,
+        "✅ تم تفعيل إشعارات فتح الكلمات.\n\n" + _notif_status_text(),
+        _notif_kb())
+    return NOTIF_MENU
+
+
+async def cb_notif_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_notify_word_open
+    set_notify_word_open(False)
+    await update.callback_query.answer("✅ تم إيقاف الإشعارات.")
+    await _reply(update,
+        "✅ تم إيقاف إشعارات فتح الكلمات.\n\n" + _notif_status_text(),
+        _notif_kb())
+    return NOTIF_MENU
+
+
+# ── Competition days open/closed status manager ───────────────────────────────
+
+def _days_toggle_list_kb() -> InlineKeyboardMarkup:
+    from storage import get_day_open
+    days = load_days()
+    buttons = []
+    for k, d in sorted(days.items()):
+        icon = "🟢" if get_day_open(k) else "🔴"
+        buttons.append([InlineKeyboardButton(
+            f"{icon} {d.get('name', f'اليوم {k}')}",
+            callback_data=f"daytoggle_sel_{k}",
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def cb_days_toggle_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    days = load_days()
+    if not days:
+        await _reply(update, "لا توجد أيام مضافة بعد.\nاستخدم ➕ إضافة يوم جديد.", _back_kb())
+        return MAIN
+    await _reply(update,
+        "📅 *إدارة أيام المسابقة*\n\nاختر يوماً لعرض حالته والتحكم به:",
+        _days_toggle_list_kb())
+    return DAYS_TOGGLE_LIST
+
+
+def _day_toggle_status_text(day_key: str) -> str:
+    from storage import get_day_open
+    d      = load_days().get(day_key, {})
+    name   = d.get("name", f"اليوم {day_key}")
+    status = "🟢 مفتوح للمشاركة" if get_day_open(day_key) else "🔴 مغلق"
+    return f"📅 *{name}*\n\nالحالة الحالية: {status}"
+
+
+def _day_toggle_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 تفعيل اليوم", callback_data="daytoggle_open"),
+         InlineKeyboardButton("🔴 إيقاف اليوم", callback_data="daytoggle_close")],
+        [InlineKeyboardButton("🔙 رجوع لقائمة الأيام", callback_data="adm_days_toggle")],
+        [InlineKeyboardButton("⬅️ القائمة الرئيسية",   callback_data="adm_main")],
+    ])
+
+
+async def day_toggle_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    day_key = update.callback_query.data[len("daytoggle_sel_"):]
+    days    = load_days()
+    if day_key not in days:
+        await _reply(update, "اليوم غير موجود.", _back_kb())
+        return MAIN
+    context.user_data["toggle_day"] = day_key
+    await _reply(update, _day_toggle_status_text(day_key), _day_toggle_kb())
+    return DAYS_TOGGLE_DAY
+
+
+async def day_toggle_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_day_open
+    day_key = context.user_data.get("toggle_day")
+    if not day_key or day_key not in load_days():
+        return await cb_days_toggle_list(update, context)
+    set_day_open(day_key, True)
+    await update.callback_query.answer("✅ تم فتح اليوم.")
+    await _reply(update,
+        "✅ تم فتح هذا اليوم للمشاركة.\n\n" + _day_toggle_status_text(day_key),
+        _day_toggle_kb())
+    return DAYS_TOGGLE_DAY
+
+
+async def day_toggle_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_day_open
+    day_key = context.user_data.get("toggle_day")
+    if not day_key or day_key not in load_days():
+        return await cb_days_toggle_list(update, context)
+    set_day_open(day_key, False)
+    await update.callback_query.answer("✅ تم إيقاف اليوم.")
+    await _reply(update,
+        "✅ تم إيقاف هذا اليوم عن المشاركة.\n\n" + _day_toggle_status_text(day_key),
+        _day_toggle_kb())
+    return DAYS_TOGGLE_DAY
+
+
 # ── Cancel ────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2160,6 +2295,25 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(cb_credit_manage, pattern="^adm_credit$"),
                 CallbackQueryHandler(cb_tlog_main,     pattern="^adm_tlog$"),
                 CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
+                CallbackQueryHandler(cb_notif_menu,       pattern="^adm_notif_toggle$"),
+                CallbackQueryHandler(cb_days_toggle_list, pattern="^adm_days_toggle$"),
+            ],
+            # ── Word-open notifications toggle
+            NOTIF_MENU: [
+                CallbackQueryHandler(cb_notif_enable,  pattern="^notif_enable$"),
+                CallbackQueryHandler(cb_notif_disable, pattern="^notif_disable$"),
+                back,
+            ],
+            # ── Competition days open/closed status manager
+            DAYS_TOGGLE_LIST: [
+                CallbackQueryHandler(day_toggle_sel, pattern=r"^daytoggle_sel_.+$"),
+                back,
+            ],
+            DAYS_TOGGLE_DAY: [
+                CallbackQueryHandler(day_toggle_open,      pattern="^daytoggle_open$"),
+                CallbackQueryHandler(day_toggle_close,     pattern="^daytoggle_close$"),
+                CallbackQueryHandler(cb_days_toggle_list,  pattern="^adm_days_toggle$"),
+                back,
             ],
             # ── Leaderboard settings
             LB_MENU: [

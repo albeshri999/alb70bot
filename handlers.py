@@ -6,7 +6,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from storage import get_user, create_user, update_user, load_days, load_users
+from storage import (get_user, create_user, update_user, load_days, load_users,
+                      get_day_open)
 from auth import check_password, is_locked
 from config import ADMIN_ID
 from credits import get_balance, add_credits, redeem_code, hint_mask
@@ -32,7 +33,7 @@ ENCOURAGEMENTS = [
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏆 مسابقة الكلمات", callback_data="menu_competition")],
+        [InlineKeyboardButton("🏆 الدخول للمسابقة", callback_data="menu_competition")],
         [InlineKeyboardButton("💳 شحن الرصيد",      callback_data="menu_credit"),
          InlineKeyboardButton("💰 معرفة الرصيد",    callback_data="menu_balance")],
         [InlineKeyboardButton("🏆 لوحة الشرف",      callback_data="menu_leaderboard")],
@@ -353,12 +354,22 @@ async def handle_day_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer(f"🚫 أنت موقوف. يمكنك المحاولة بعد: {remaining}", show_alert=True)
         return
 
-    await query.answer()
     day_key = query.data.replace("day_", "")
     days    = load_days()
     if day_key not in days:
+        await query.answer()
         await query.edit_message_text("اليوم غير موجود. استخدم /start للمحاولة مجدداً.")
         return
+
+    if not get_day_open(day_key):
+        await query.answer(
+            "🚫 المشاركة في هذا اليوم غير متاحة حالياً.\n\n"
+            "انتظر حتى يقوم المشرف بفتح هذا اليوم.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
 
     user = get_user(user_id)
     if not user:
@@ -551,6 +562,10 @@ async def _send_word_open_notification(context: ContextTypes.DEFAULT_TYPE,
                                         step: int) -> None:
     """Notify the admin whenever a player opens (solves) a word."""
     if not ADMIN_ID:
+        return
+
+    from storage import get_notify_word_open
+    if not get_notify_word_open():
         return
 
     def _esc(t: str) -> str:
