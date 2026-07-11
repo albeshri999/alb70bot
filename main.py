@@ -15,6 +15,7 @@ from handlers import (
 )
 from admin import build_admin_handler
 from quiz_admin import build_quiz_admin_handler
+from admin_settings import build_admin_settings_handler
 from quiz_user import (
     handle_menu_quizzes, handle_quiz_view, handle_quiz_start, handle_quiz_answer,
 )
@@ -45,6 +46,9 @@ def main() -> None:
 
     # Quiz Management — fully independent ConversationHandler (📝 إدارة الاختبارات)
     app.add_handler(build_quiz_admin_handler())
+
+    # Admin Settings — owner-only ConversationHandler (⚙️ إعدادات المشرفين)
+    app.add_handler(build_admin_settings_handler())
 
     # Regular user commands
     app.add_handler(CommandHandler("start", start))

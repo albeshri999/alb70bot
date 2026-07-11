@@ -89,7 +89,17 @@ async def _reply(update: Update, text: str, keyboard=None):
         await update.message.reply_text(**kw)
 
 
-def _main_kb() -> InlineKeyboardMarkup:
+def _main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
+    if not is_owner:
+        # Restricted admin — only these six sections are visible/reachable.
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 المشاركون",            callback_data="adm_participants")],
+            [InlineKeyboardButton("📊 الإحصائيات",           callback_data="adm_stats")],
+            [InlineKeyboardButton("📝 إدارة الاختبارات",     callback_data="adm_quizzes")],
+            [InlineKeyboardButton("📢 إذاعة رسالة",          callback_data="adm_broadcast")],
+            [InlineKeyboardButton("💰 إدارة أرصدة المشاركين", callback_data="adm_credit")],
+            [InlineKeyboardButton("🏆 إعدادات لوحة الشرف",   callback_data="adm_leaderboard")],
+        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 المشاركون",           callback_data="adm_participants"),
          InlineKeyboardButton("🏆 النتائج",              callback_data="adm_results")],
@@ -108,6 +118,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📜 سجل حركة الرصيد",      callback_data="adm_tlog")],
         [InlineKeyboardButton("🏆 إعدادات لوحة الشرف",   callback_data="adm_leaderboard")],
         [InlineKeyboardButton("⚙️ الإعدادات",             callback_data="adm_settings")],
+        [InlineKeyboardButton("⚙️ إعدادات المشرفين",      callback_data="adm_admins")],
     ])
 
 
@@ -167,7 +178,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await update.message.reply_text(
         "⚙️ *لوحة تحكم المشرف*",
-        reply_markup=_main_kb(),
+        reply_markup=_main_kb(admins_store.is_owner(update.effective_user.id)),
         parse_mode=ParseMode.MARKDOWN,
     )
     return MAIN
@@ -176,7 +187,8 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data.clear()
-    await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb())
+    await _reply(update, "⚙️ *لوحة تحكم المشرف*",
+                 _main_kb(admins_store.is_owner(update.effective_user.id)))
     return MAIN
 
 
@@ -587,6 +599,10 @@ async def part_rename_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ── Results ───────────────────────────────────────────────────────────────────
 
 async def cb_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     users = load_users()
     days  = load_days()
@@ -639,6 +655,10 @@ async def cb_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Export Excel ──────────────────────────────────────────────────────────────
 
 async def cb_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer("جاري إنشاء الملف…")
     users = load_users()
     days  = load_days()
@@ -687,6 +707,10 @@ async def cb_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Manage days (day selection hub) ──────────────────────────────────────────
 
 async def cb_manage_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     days = load_days()
     if not days:
@@ -1000,6 +1024,10 @@ async def edit_day_lockout_handler(update: Update, context: ContextTypes.DEFAULT
 # ── Add new day (unlimited stages) ───────────────────────────────────────────
 
 async def cb_add_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     context.user_data["new_day"] = {"name": "", "stages": []}
     await _reply(update, "➕ *إضافة يوم جديد*\n\nأدخل اسم اليوم:", _back_kb())
@@ -1134,6 +1162,10 @@ async def _finish_add_day(update: Update, context: ContextTypes.DEFAULT_TYPE, vi
 # ── Delete day ────────────────────────────────────────────────────────────────
 
 async def cb_delete_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     days = load_days()
     if not days:
@@ -1185,6 +1217,10 @@ async def del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Reset results ─────────────────────────────────────────────────────────────
 
 async def cb_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     users = load_users()
     await _reply(update,
@@ -1270,6 +1306,10 @@ def _codes_menu_kb() -> InlineKeyboardMarkup:
 
 
 async def cb_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     codes  = load_codes()
     unused = sum(1 for v in codes.values() if not normalize_code(v)["used"])
@@ -1831,6 +1871,10 @@ def _tlog_pager(txns: list, page: int, page_cb: str) -> tuple[str, InlineKeyboar
 
 
 async def cb_tlog_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     from transactions import load_all
     total = len(load_all())
@@ -1993,6 +2037,10 @@ def _settings_kb() -> InlineKeyboardMarkup:
 
 
 async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     cost = get_hint_cost()
     await _reply(update,
@@ -2155,6 +2203,10 @@ def _notif_kb() -> InlineKeyboardMarkup:
 
 
 async def cb_notif_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     await _reply(update, _notif_status_text(), _notif_kb())
     return NOTIF_MENU
@@ -2197,6 +2249,10 @@ def _days_toggle_list_kb() -> InlineKeyboardMarkup:
 
 
 async def cb_days_toggle_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
     await update.callback_query.answer()
     days = load_days()
     if not days:

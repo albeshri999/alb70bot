@@ -3,7 +3,11 @@
 Admin-management commands — standalone, independent of admin.py's
 ConversationHandler (plain CommandHandlers, no shared state).
 
-/addadmin <id>     — owner only: grant someone full admin access
+These are a command-line-style equivalent of the "⚙️ إعدادات المشرفين"
+button flow in admin_settings.py — both operate on the same
+admins_store.py data.
+
+/addadmin <id>     — owner only: grant someone restricted admin access
 /removeadmin <id>  — owner only: revoke an extra admin's access
 /admins            — any admin: list current admins (owner + extras)
 """
@@ -22,20 +26,29 @@ async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("الاستخدام:\n/addadmin <telegram_id>")
         return
     new_id = int(context.args[0])
-    if store.add_admin(new_id):
-        await update.message.reply_text(
-            f"✅ تمت إضافة `{new_id}` كمشرف جديد.\nأصبح لديه وصول كامل للوحة التحكم.",
-            parse_mode=ParseMode.MARKDOWN,
+
+    if store.is_admin(new_id):
+        await update.message.reply_text("⚠️ هذا المستخدم مشرف بالفعل.")
+        return
+
+    name = username = ""
+    try:
+        chat = await context.bot.get_chat(new_id)
+        name     = chat.full_name or ""
+        username = chat.username or ""
+    except Exception:
+        pass  # bot may not have seen this user yet — still fine to add by ID
+
+    store.add_admin(new_id, name=name, username=username,
+                    added_by=update.effective_user.id)
+    await update.message.reply_text("✅ تمت إضافة المشرف بنجاح.")
+    try:
+        await context.bot.send_message(
+            chat_id=new_id,
+            text="🎉 تمت إضافتك كمشرف في البوت.\n\nاستخدم /admin لفتح لوحة التحكم.",
         )
-        try:
-            await context.bot.send_message(
-                chat_id=new_id,
-                text="🎉 تمت إضافتك كمشرف في البوت.\n\nاستخدم /admin لفتح لوحة التحكم.",
-            )
-        except Exception:
-            pass  # the user may not have started a chat with the bot yet
-    else:
-        await update.message.reply_text(f"⚠️ `{new_id}` مشرف بالفعل.", parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass  # the user may not have started a chat with the bot yet
 
 
 async def remove_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -67,7 +80,10 @@ async def list_admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     extras = store.load_extra_admins()
     if extras:
         lines.append("\n*مشرفون إضافيون:*")
-        lines += [f"• `{uid}`" for uid in extras]
+        for rec in extras.values():
+            name = rec.get("name") or "—"
+            date = (rec.get("added_at") or "—")[:16].replace("T", " ")
+            lines.append(f"• *{name}*\n   `{rec.get('telegram_id')}`  —  أُضيف: {date}")
     else:
         lines.append("\nلا يوجد مشرفون إضافيون حالياً.")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
