@@ -10,19 +10,29 @@ from storage import get_user, create_user, update_user, load_days, load_users
 from auth import check_password, is_locked
 from config import ADMIN_ID
 from credits import get_balance, add_credits, redeem_code, hint_mask
-from utils import get_stage_question, get_stage_answer, default_question, stage_ordinal
+from utils import get_stage_question, get_stage_answer, get_stage_meaning, default_question, stage_ordinal
 
 logger = logging.getLogger(__name__)
 
 WORD_REWARD = 10          # credits added when a word is opened successfully
 MIN_REVEALS_FOR_REWARD = 3  # fewer reveals than this ⇒ reward is blocked
 
+# Random encouragement messages shown when a word is answered correctly.
+ENCOURAGEMENTS = [
+    "🎉 أحسنت!",
+    "🌟 ممتاز!",
+    "👏 بارك الله فيك!",
+    "🏆 رائع!",
+    "💪 إجابة موفقة!",
+    "✨ أحسنت وأبدعت!",
+]
+
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏆 مسابقة الكلمات", callback_data="menu_competition")],
+        [InlineKeyboardButton("🏆 الدخول للمسابقة", callback_data="menu_competition")],
         [InlineKeyboardButton("💳 شحن الرصيد",      callback_data="menu_credit"),
          InlineKeyboardButton("💰 معرفة الرصيد",    callback_data="menu_balance")],
         [InlineKeyboardButton("🏆 لوحة الشرف",      callback_data="menu_leaderboard")],
@@ -84,7 +94,11 @@ WS_IN_PROGRESS = "in_progress"
 WS_COMPLETED   = "completed"
 
 ALREADY_OPENED_MSG = "✅ لقد قمت بفتح هذه الكلمة مسبقًا."
-DAY_FINISHED_MSG   = "🎉 لقد أنهيت جميع كلمات هذا اليوم."
+DAY_FINISHED_MSG   = (
+    "🎉 مبارك!\n\n"
+    "لقد أنهيت جميع كلمات هذا اليوم بنجاح.\n\n"
+    "🌟 نراك في اليوم التالي."
+)
 
 
 def _ws_key(day_key: str, step: int) -> str:
@@ -260,6 +274,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     elif state == "awaiting_password":
         await _handle_password(update, user_id, text, context)
+    elif state == "word_solved":
+        await update.message.reply_text(
+            "⬆️ الرجاء الضغط على زر \"➡️ الانتقال إلى الكلمة التالية\" أعلاه للمتابعة.",
+            reply_markup=_next_word_kb(),
+        )
     elif state == "locked":
         update_user(user_id, state="awaiting_password")
         user     = get_user(user_id)
@@ -451,7 +470,7 @@ async def _handle_password(update: Update, user_id: int, text: str,
         else:
             bal_before = get_balance(user_id)
             new_bal    = add_credits(user_id, WORD_REWARD)
-            reward_text = f"\n\n🎁 تمت إضافة *{WORD_REWARD}* نقاط لرصيدك."
+            reward_text = f"\n\n🏆 تمت إضافة *{WORD_REWARD}* نقاط إلى رصيدك."
             try:
                 from transactions import record as _rec
                 _rec(user_id, user.get("full_name", "—"),
@@ -471,56 +490,53 @@ async def _handle_password(update: Update, user_id: int, text: str,
             attempts=prev_attempts + 1,
         )
 
+        # ── Success message: encouragement + revealed word + its meaning ─────
+        answer_word   = get_stage_answer(day_data, step)
+        word_meaning  = get_stage_meaning(day_data, step)
+        encouragement = random.choice(ENCOURAGEMENTS)
+        success_text = (
+            f"{encouragement}\n\n"
+            f"📖 الكلمة:\n{answer_word}\n\n"
+            f"📚 معنى الكلمة:\n{word_meaning}"
+            f"{reward_text}"
+        )
+
+        # Never auto-advance — the player must tap "الانتقال إلى الكلمة التالية".
         next_step = step + 1
         if next_step >= total_steps:
-            final_word   = day_data.get("final_word", "")
             completed_at = datetime.utcnow()
             update_user(
                 user_id,
-                password_step=next_step,
-                state="completed",
+                state="word_solved",
                 completed=True,
                 completed_at=completed_at.isoformat(),
                 password_attempts=0,
                 hint_step=-1,
                 hint_revealed=[],
             )
-            await update.message.reply_text(
-                f"🎉 أحسنت ومبارك!\n\nالكلمة النهائية هي:\n\n*{final_word}*"
-                f"{reward_text}\n\n"
-                f"استخدم /start للعودة للقائمة الرئيسية.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            if context:
-                try:
-                    await _send_word_open_notification(
-                        context, user_id, day_data, step)
-                except Exception as _e:
-                    logger.warning("Word-open notification failed: %s", _e)
+        else:
+            update_user(user_id, state="word_solved", hint_step=-1, hint_revealed=[])
+
+        await update.message.reply_text(
+            success_text,
+            reply_markup=_next_word_kb(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+        if context:
+            try:
+                await _send_word_open_notification(
+                    context, user_id, day_data, step)
+            except Exception as _e:
+                logger.warning("Word-open notification failed: %s", _e)
+            if next_step >= total_steps:
                 try:
                     await _send_admin_notification(
-                        context, user_id, user, day_key, day_data,
-                        final_word, completed_at,
+                        context, user_id, get_user(user_id), day_key, day_data,
+                        completed_at,
                     )
                 except Exception as _e:
                     logger.warning("Admin notification failed: %s", _e)
-        else:
-            update_user(user_id, password_step=next_step, hint_step=-1, hint_revealed=[])
-            if _get_word_status(get_user(user_id), day_key, next_step)["status"] == WS_NOT_STARTED:
-                _update_word_status(user_id, day_key, next_step, status=WS_IN_PROGRESS)
-            ptext = _prompt_text(day_data, next_step, get_user(user_id))
-            req   = _next_letter_requirement(day_key, next_step, 0)
-            await update.message.reply_text(
-                f"✅ صحيح!{reward_text}\n\n{ptext}",
-                reply_markup=_hint_kb(req),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            if context:
-                try:
-                    await _send_word_open_notification(
-                        context, user_id, day_data, step)
-                except Exception as _e:
-                    logger.warning("Word-open notification failed: %s", _e)
     else:
         _update_word_status(
             user_id, day_key, step,
@@ -563,7 +579,7 @@ async def _send_word_open_notification(context: ContextTypes.DEFAULT_TYPE,
 async def _send_admin_notification(context: ContextTypes.DEFAULT_TYPE,
                                     user_id: int, user: dict,
                                     day_key: str, day_data: dict,
-                                    final_word: str, completed_at: datetime) -> None:
+                                    completed_at: datetime) -> None:
     """Send a real-time completion notification to the admin."""
     if not ADMIN_ID:
         return
@@ -605,7 +621,6 @@ async def _send_admin_notification(context: ContextTypes.DEFAULT_TYPE,
         f"📱 *اسم المستخدم:*\n{username}\n\n"
         f"🆔 *معرف تيليجرام:*\n`{user_id}`\n\n"
         f"📅 *المسابقة:*\n{day_name}\n\n"
-        f"🏆 *الكلمة النهائية:*\n*{_esc(final_word)}*\n\n"
         f"⏱ *مدة الإنجاز:*\n{duration_str}\n\n"
         f"🕒 *وقت الإنجاز:*\n{ach_date}\n{ach_time}\n\n"
         f"🏅 *ترتيب الإنجاز:*\n#{rank}\n\n"
@@ -925,6 +940,7 @@ async def handle_word_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     step  = _first_pending_step(user, day_key)
     total = len(day_data.get("stages", []))
     if step >= total:
+        update_user(user_id, state="completed")
         await query.edit_message_text(DAY_FINISHED_MSG, reply_markup=_back_to_main_kb())
         return
 

@@ -30,3 +30,10 @@ def get_stage_answer(day_data: dict, step: int) -> str:
     if step < len(stages):
         return stages[step].get("answer", "")
     return ""
+
+
+def get_stage_meaning(day_data: dict, step: int) -> str:
+    stages = day_data.get("stages", [])
+    if step < len(stages):
+        return stages[step].get("meaning", "")
+    return ""
