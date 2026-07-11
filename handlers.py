@@ -6,13 +6,16 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from storage import get_user, create_user, update_user, load_days, load_users, get_hint_cost
+from storage import get_user, create_user, update_user, load_days, load_users
 from auth import check_password, is_locked
 from config import ADMIN_ID
-from credits import get_balance, deduct_credits, redeem_code, hint_mask
-from utils import get_stage_question, get_stage_answer, default_question
+from credits import get_balance, add_credits, redeem_code, hint_mask
+from utils import get_stage_question, get_stage_answer, default_question, stage_ordinal
 
 logger = logging.getLogger(__name__)
+
+WORD_REWARD = 10          # credits added when a word is opened successfully
+MIN_REVEALS_FOR_REWARD = 3  # fewer reveals than this ⇒ reward is blocked
 
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
@@ -22,6 +25,7 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 الدخول للمسابقة", callback_data="menu_competition")],
         [InlineKeyboardButton("💳 شحن الرصيد",      callback_data="menu_credit"),
          InlineKeyboardButton("💰 معرفة الرصيد",    callback_data="menu_balance")],
+        [InlineKeyboardButton("🏆 لوحة الشرف",      callback_data="menu_leaderboard")],
     ])
 
 
@@ -31,10 +35,10 @@ def _back_to_main_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def _hint_kb() -> InlineKeyboardMarkup:
-    cost = get_hint_cost()
+def _hint_kb(requirement: int | None = None) -> InlineKeyboardMarkup:
+    label = "🔍 كشف حرف" if requirement is None else f"🔍 كشف حرف (يتطلب {requirement} نقطة)"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💡 كشف حرف ({cost} نقطة)", callback_data="hint_reveal")],
+        [InlineKeyboardButton(label, callback_data="hint_reveal")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_days")],
     ])
 
@@ -67,6 +71,94 @@ def _get_hint_state(user: dict, step: int) -> set:
     if user.get("hint_step", -1) == step:
         return set(user.get("hint_revealed", []))
     return set()
+
+
+# ── Word status tracking ──────────────────────────────────────────────────────
+# Every word has a permanent per-user record in user["word_status"] keyed by
+# "{day_key}:{step}" with: status (not_started/in_progress/completed),
+# revealed letters count, reward_granted, reward_blocked, completion time,
+# and attempts. Stored in users.json so it survives bot restarts.
+
+WS_NOT_STARTED = "not_started"
+WS_IN_PROGRESS = "in_progress"
+WS_COMPLETED   = "completed"
+
+ALREADY_OPENED_MSG = "✅ لقد قمت بفتح هذه الكلمة مسبقًا."
+DAY_FINISHED_MSG   = "🎉 لقد أنهيت جميع كلمات هذا اليوم."
+
+
+def _ws_key(day_key: str, step: int) -> str:
+    return f"{day_key}:{step}"
+
+
+def _get_word_status(user: dict, day_key: str, step: int) -> dict:
+    ws = (user or {}).get("word_status", {}).get(_ws_key(day_key, step))
+    if not isinstance(ws, dict):
+        ws = {}
+    return {
+        "status":         ws.get("status", WS_NOT_STARTED),
+        "revealed":       ws.get("revealed", 0),
+        "reward_granted": ws.get("reward_granted", False),
+        "reward_blocked": ws.get("reward_blocked", False),
+        "completed_at":   ws.get("completed_at"),
+        "attempts":       ws.get("attempts", 0),
+    }
+
+
+def _update_word_status(user_id: int, day_key: str, step: int, **changes) -> None:
+    user   = get_user(user_id) or {}
+    all_ws = dict(user.get("word_status", {}))
+    cur    = _get_word_status(user, day_key, step)
+    cur.update(changes)
+    all_ws[_ws_key(day_key, step)] = cur
+    update_user(user_id, word_status=all_ws)
+
+
+def _word_completed(user: dict, day_key: str, step: int) -> bool:
+    if _get_word_status(user, day_key, step)["status"] == WS_COMPLETED:
+        return True
+    # Legacy users who finished a day before word_status existed.
+    return bool(user.get("completed")) and str(user.get("selected_day")) == str(day_key)
+
+
+def _first_pending_step(user: dict, day_key: str) -> int:
+    days  = load_days()
+    total = len(days.get(str(day_key), {}).get("stages", []))
+    for i in range(total):
+        if not _word_completed(user, day_key, i):
+            return i
+    return total
+
+
+def _next_word_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➡️ الانتقال إلى الكلمة التالية", callback_data="word_next")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_days")],
+    ])
+
+
+# ── Letter reveal requirements ────────────────────────────────────────────────
+# Word 1 letters require 10, 20, 30, … (each letter +10).
+# Each new word starts 20 points higher than the last letter of the previous
+# word. Works across all days and any number of words automatically.
+
+def _word_base(day_key: str, step: int) -> int:
+    """Minimum balance required for the FIRST letter of the given word."""
+    days = load_days()
+    base = 10
+    for dk in sorted(days.keys(), key=lambda k: int(k) if str(k).isdigit() else 10**9):
+        stages = days[dk].get("stages", [])
+        for i, stage in enumerate(stages):
+            if str(dk) == str(day_key) and i == step:
+                return base
+            length = max(1, len(stage.get("answer", "")))
+            base = base + 10 * (length - 1) + 20
+    return base
+
+
+def _next_letter_requirement(day_key: str, step: int, revealed_count: int) -> int:
+    """Minimum balance required to reveal the next letter of the current word."""
+    return _word_base(day_key, step) + 10 * revealed_count
 
 
 def _prompt_text(day_data: dict, step: int, user: dict) -> str:
@@ -172,12 +264,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update_user(user_id, state="awaiting_password")
         user     = get_user(user_id)
         step     = user.get("password_step", 0)
+        day_key  = str(user.get("selected_day", ""))
         days     = load_days()
-        day_data = days.get(str(user.get("selected_day", "")), {})
+        day_data = days.get(day_key, {})
         ptext    = _prompt_text(day_data, step, user)
+        revealed = _get_hint_state(user, step)
+        req      = _next_letter_requirement(day_key, step, len(revealed))
         await update.message.reply_text(
             f"🔓 انتهى الإيقاف.\n\n{ptext}",
-            reply_markup=_hint_kb(),
+            reply_markup=_hint_kb(req),
             parse_mode=ParseMode.MARKDOWN,
         )
     elif state == "completed":
@@ -251,21 +346,41 @@ async def handle_day_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("الرجاء استخدام /start للبدء.")
         return
 
-    update_user(
-        user_id,
+    day_data = days[day_key]
+    total    = len(day_data.get("stages", []))
+
+    # Resume at the first word not yet completed — completed words can never
+    # be replayed.
+    resume = _first_pending_step(user, day_key)
+    if resume >= total:
+        update_user(user_id, selected_day=day_key, state="main_menu")
+        await query.edit_message_text(
+            DAY_FINISHED_MSG, reply_markup=_back_to_main_kb(),
+        )
+        return
+
+    fields = dict(
         selected_day=day_key,
-        password_step=0,
+        password_step=resume,
         state="awaiting_password",
         hint_step=-1,
         hint_revealed=[],
-        day_started_at=datetime.utcnow().isoformat(),
     )
+    # Only start the day clock the first time the player enters this day.
+    if resume == 0 and _get_word_status(user, day_key, 0)["status"] == WS_NOT_STARTED:
+        fields["day_started_at"] = datetime.utcnow().isoformat()
+    elif not user.get("day_started_at"):
+        fields["day_started_at"] = datetime.utcnow().isoformat()
+    update_user(user_id, **fields)
 
-    day_data = days[day_key]
-    ptext    = _prompt_text(day_data, 0, get_user(user_id))
+    if _get_word_status(user, day_key, resume)["status"] == WS_NOT_STARTED:
+        _update_word_status(user_id, day_key, resume, status=WS_IN_PROGRESS)
+
+    ptext = _prompt_text(day_data, resume, get_user(user_id))
+    req   = _next_letter_requirement(day_key, resume, 0)
     await query.edit_message_text(
         f"اخترت: *{day_data['name']}*\n\n{ptext}",
-        reply_markup=_hint_kb(),
+        reply_markup=_hint_kb(req),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -295,9 +410,67 @@ async def _handle_password(update: Update, user_id: int, text: str,
     day_data    = days.get(day_key, {})
     total_steps = len(day_data.get("stages", []))
 
+    # ── Prevent solving the same word twice ───────────────────────────────────
+    # Current word already completed (safety net — normally we never land here).
+    if _word_completed(user, day_key, step):
+        await update.message.reply_text(
+            ALREADY_OPENED_MSG, reply_markup=_next_word_kb(),
+        )
+        return
+    # Player re-submitted the answer of a word they already completed:
+    # no points, no transaction, no admin notification, no attempt counted.
+    # The CURRENT word's answer always takes priority — if the submitted text
+    # matches the current (unsolved) word, it is processed normally even when
+    # another completed word happens to share the same answer text.
+    submitted     = text.strip()
+    stages        = day_data.get("stages", [])
+    current_answer = stages[step].get("answer", "") if step < len(stages) else ""
+    if submitted != current_answer:
+        for i, stage in enumerate(stages):
+            if (i != step and submitted == stage.get("answer", "")
+                    and _word_completed(user, day_key, i)):
+                await update.message.reply_text(
+                    ALREADY_OPENED_MSG, reply_markup=_next_word_kb(),
+                )
+                return
+
+    prev_attempts = _get_word_status(user, day_key, step)["attempts"]
+
     success, message = check_password(user_id, text)
 
     if success:
+        # ── Word reward (or block) ────────────────────────────────────────────
+        revealed_count = max(
+            len(_get_hint_state(user, step)),
+            int((user.get("word_reveals", {}) or {}).get(_ws_key(day_key, step), 0)),
+        )
+        reward_blocked = revealed_count < MIN_REVEALS_FOR_REWARD
+        reward_text    = ""
+        if reward_blocked:
+            reward_text = "\n\n⚠️ تم حجب نقاط هذه الكلمة لوجود استعانة خارجية."
+        else:
+            bal_before = get_balance(user_id)
+            new_bal    = add_credits(user_id, WORD_REWARD)
+            reward_text = f"\n\n🎁 تمت إضافة *{WORD_REWARD}* نقاط لرصيدك."
+            try:
+                from transactions import record as _rec
+                _rec(user_id, user.get("full_name", "—"),
+                     "word_reward", WORD_REWARD, bal_before, new_bal,
+                     f"مكافأة فتح الكلمة {stage_ordinal(step)}")
+            except Exception as _e:
+                logger.warning("transaction record failed: %s", _e)
+
+        # Permanent per-word record — survives restarts and blocks re-solving.
+        _update_word_status(
+            user_id, day_key, step,
+            status=WS_COMPLETED,
+            revealed=revealed_count,
+            reward_granted=not reward_blocked,
+            reward_blocked=reward_blocked,
+            completed_at=datetime.utcnow().isoformat(),
+            attempts=prev_attempts + 1,
+        )
+
         next_step = step + 1
         if next_step >= total_steps:
             final_word   = day_data.get("final_word", "")
@@ -313,11 +486,17 @@ async def _handle_password(update: Update, user_id: int, text: str,
                 hint_revealed=[],
             )
             await update.message.reply_text(
-                f"🎉 أحسنت ومبارك!\n\nالكلمة النهائية هي:\n\n*{final_word}*\n\n"
+                f"🎉 أحسنت ومبارك!\n\nالكلمة النهائية هي:\n\n*{final_word}*"
+                f"{reward_text}\n\n"
                 f"استخدم /start للعودة للقائمة الرئيسية.",
                 parse_mode=ParseMode.MARKDOWN,
             )
             if context:
+                try:
+                    await _send_word_open_notification(
+                        context, user_id, day_data, step)
+                except Exception as _e:
+                    logger.warning("Word-open notification failed: %s", _e)
                 try:
                     await _send_admin_notification(
                         context, user_id, user, day_key, day_data,
@@ -327,14 +506,58 @@ async def _handle_password(update: Update, user_id: int, text: str,
                     logger.warning("Admin notification failed: %s", _e)
         else:
             update_user(user_id, password_step=next_step, hint_step=-1, hint_revealed=[])
+            if _get_word_status(get_user(user_id), day_key, next_step)["status"] == WS_NOT_STARTED:
+                _update_word_status(user_id, day_key, next_step, status=WS_IN_PROGRESS)
             ptext = _prompt_text(day_data, next_step, get_user(user_id))
+            req   = _next_letter_requirement(day_key, next_step, 0)
             await update.message.reply_text(
-                f"✅ صحيح!\n\n{ptext}",
-                reply_markup=_hint_kb(),
+                f"✅ صحيح!{reward_text}\n\n{ptext}",
+                reply_markup=_hint_kb(req),
                 parse_mode=ParseMode.MARKDOWN,
             )
+            if context:
+                try:
+                    await _send_word_open_notification(
+                        context, user_id, day_data, step)
+                except Exception as _e:
+                    logger.warning("Word-open notification failed: %s", _e)
     else:
+        _update_word_status(
+            user_id, day_key, step,
+            status=WS_IN_PROGRESS,
+            attempts=prev_attempts + 1,
+        )
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+
+async def _send_word_open_notification(context: ContextTypes.DEFAULT_TYPE,
+                                        user_id: int, day_data: dict,
+                                        step: int) -> None:
+    """Notify the admin whenever a player opens (solves) a word."""
+    if not ADMIN_ID:
+        return
+
+    def _esc(t: str) -> str:
+        for ch in ("_", "*", "`", "[", "]"):
+            t = t.replace(ch, f"\\{ch}")
+        return t
+
+    user     = get_user(user_id) or {}
+    name     = _esc(user.get("full_name", "—") or "—")
+    day_name = _esc(day_data.get("name", "—"))
+    word_lbl = f"الكلمة {stage_ordinal(step)}"
+    balance  = get_balance(user_id)
+
+    text = (
+        "🎉 *تم فتح كلمة*\n\n"
+        f"👤 *المتسابق:*\n{name}\n\n"
+        f"📅 *اليوم:*\n{day_name}\n\n"
+        f"🔑 *الكلمة:*\n{word_lbl}\n\n"
+        f"💰 *الرصيد الحالي:*\n{balance}"
+    )
+    await context.bot.send_message(
+        chat_id=ADMIN_ID, text=text, parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def _send_admin_notification(context: ContextTypes.DEFAULT_TYPE,
@@ -543,6 +766,61 @@ async def handle_menu_balance(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+# ── Leaderboard ───────────────────────────────────────────────────────────────
+
+def _build_leaderboard_text() -> str:
+    from storage import get_leaderboard_count
+    count = get_leaderboard_count()
+    users = load_users()
+
+    def _esc(t: str) -> str:
+        for ch in ("_", "*", "`", "[", "]"):
+            t = t.replace(ch, f"\\{ch}")
+        return t
+
+    def _sort_key(u: dict):
+        credits      = u.get("credits", 0)
+        completed_at = u.get("completed_at") or "9999-12-31T23:59:59"
+        return (-credits, completed_at)
+
+    ranked = sorted(
+        (u for u in users.values() if not u.get("banned")),
+        key=_sort_key,
+    )[:count]
+
+    if not ranked:
+        return "🏆 *لوحة الشرف*\n\nلا يوجد متصدرون بعد."
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = ["🏆 *لوحة الشرف*"]
+    for i, u in enumerate(ranked):
+        badge = medals[i] if i < len(medals) else f"{i + 1}."
+        name  = _esc(u.get("full_name", "—") or "—")
+        lines.append(f"\n{badge} {name}\n{u.get('credits', 0)} نقطة")
+    return "\n".join(lines)
+
+
+async def handle_menu_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user  = get_user(query.from_user.id)
+    if _is_banned(user):
+        await query.answer(BAN_MESSAGE, show_alert=True)
+        return
+    await query.answer()
+
+    from storage import get_leaderboard_visible
+    if not get_leaderboard_visible():
+        text = "🙈 تم إخفاء قائمة الأوائل.\n\nشد حيلك حتى تكون منهم 😎"
+    else:
+        text = _build_leaderboard_text()
+
+    await query.edit_message_text(
+        text,
+        reply_markup=_back_to_main_kb(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 # ── Hint callback ─────────────────────────────────────────────────────────────
 
 async def handle_hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,11 +841,6 @@ async def handle_hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("🚫 أنت موقوف.", show_alert=True)
         return
 
-    hint_cost = get_hint_cost()
-    if get_balance(user_id) < hint_cost:
-        await query.answer("❌ رصيدك غير كافٍ لكشف حرف.", show_alert=True)
-        return
-
     day_key  = str(user.get("selected_day", ""))
     step     = user.get("password_step", 0)
     days     = load_days()
@@ -578,6 +851,10 @@ async def handle_hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("حدث خطأ.", show_alert=True)
         return
 
+    if _word_completed(user, day_key, step):
+        await query.answer(ALREADY_OPENED_MSG, show_alert=True)
+        return
+
     password   = stages[step].get("answer", "")
     revealed   = _get_hint_state(user, step)
     unrevealed = [i for i in range(len(password)) if i not in revealed]
@@ -586,32 +863,81 @@ async def handle_hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("تم الكشف عن جميع الحروف بالفعل.", show_alert=True)
         return
 
-    balance_before  = get_balance(user_id)
-    ok, new_balance = deduct_credits(user_id, hint_cost)
-    if not ok:
-        await query.answer("❌ رصيدك غير كافٍ.", show_alert=True)
+    # No deduction — the balance only needs to MEET the requirement.
+    requirement = _next_letter_requirement(day_key, step, len(revealed))
+    balance     = get_balance(user_id)
+    if balance < requirement:
+        await query.answer("❌ رصيدك غير كافٍ لكشف هذا الحرف.", show_alert=True)
         return
 
-    try:
-        from transactions import record as _rec
-        _rec(user_id, user.get("full_name", "—"),
-             "hint_purchase", hint_cost, balance_before, new_balance,
-             "كشف حرف")
-    except Exception as _e:
-        logger.warning("transaction record failed: %s", _e)
-
+    # Reveal exactly ONE new letter.
     new_idx = random.choice(unrevealed)
     revealed.add(new_idx)
-    update_user(user_id, hint_step=step, hint_revealed=list(revealed))
+    word_reveals = dict(user.get("word_reveals", {}))
+    word_reveals[f"{day_key}:{step}"] = len(revealed)
+    update_user(user_id, hint_step=step, hint_revealed=list(revealed),
+                word_reveals=word_reveals)
+    _update_word_status(user_id, day_key, step,
+                        status=WS_IN_PROGRESS, revealed=len(revealed))
 
     mask      = hint_mask(password, revealed)
     question  = get_stage_question(day_data, step)
     remaining = len(unrevealed) - 1
-    text      = f"`{mask}`\n\n{question}\n\n💳 رصيدك: *{new_balance}* نقطة"
-    kb        = _hint_kb() if remaining > 0 else None
+    text      = f"`{mask}`\n\n{question}\n\n💳 رصيدك: *{balance}* نقطة"
+    if remaining > 0:
+        next_req = _next_letter_requirement(day_key, step, len(revealed))
+        kb = _hint_kb(next_req)
+    else:
+        kb = None
 
     await query.answer()
     await query.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+
+
+# ── Next-word navigation ──────────────────────────────────────────────────────
+
+async def handle_word_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query   = update.callback_query
+    user_id = query.from_user.id
+    user    = get_user(user_id)
+
+    if _is_banned(user):
+        await query.answer(BAN_MESSAGE, show_alert=True)
+        return
+
+    locked, remaining = is_locked(user_id)
+    if locked:
+        await query.answer(f"🚫 أنت موقوف. يمكنك المحاولة بعد: {remaining}", show_alert=True)
+        return
+
+    await query.answer()
+    if not user:
+        await query.edit_message_text("الرجاء استخدام /start للبدء.")
+        return
+
+    day_key  = str(user.get("selected_day", ""))
+    days     = load_days()
+    day_data = days.get(day_key)
+    if not day_data:
+        await query.edit_message_text("اليوم غير موجود. استخدم /start للمحاولة مجدداً.")
+        return
+
+    step  = _first_pending_step(user, day_key)
+    total = len(day_data.get("stages", []))
+    if step >= total:
+        await query.edit_message_text(DAY_FINISHED_MSG, reply_markup=_back_to_main_kb())
+        return
+
+    update_user(user_id, password_step=step, state="awaiting_password",
+                hint_step=-1, hint_revealed=[])
+    if _get_word_status(user, day_key, step)["status"] == WS_NOT_STARTED:
+        _update_word_status(user_id, day_key, step, status=WS_IN_PROGRESS)
+
+    ptext = _prompt_text(day_data, step, get_user(user_id))
+    req   = _next_letter_requirement(day_key, step, 0)
+    await query.edit_message_text(
+        ptext, reply_markup=_hint_kb(req), parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 # ── Back navigation callbacks ─────────────────────────────────────────────────

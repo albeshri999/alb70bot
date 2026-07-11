@@ -43,14 +43,16 @@ logger = logging.getLogger(__name__)
  SETTINGS, HINT_COST_VAL,
  # Credit management
  CREDIT_SEARCH, CREDIT_USER_SEL, CREDIT_USER_MENU,
- CREDIT_ADD, CREDIT_REMOVE, CREDIT_RESET_CONFIRM,
+ CREDIT_ADD, CREDIT_REMOVE, CREDIT_REMOVE_REASON, CREDIT_RESET_CONFIRM,
  # Transaction log
  TRANS_LOG, TRANS_USER_SEARCH, TRANS_DELETE_CONFIRM,
  # Participants list / detail
  PART_LIST, PART_DETAIL,
  PART_BAN_REASON, PART_DELETE_CONFIRM,
  PART_RENAME,
- ) = range(43)
+ # Leaderboard settings
+ LB_MENU, LB_COUNT_CUSTOM,
+ ) = range(46)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -97,6 +99,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 إدارة أكواد الشحن",    callback_data="adm_codes")],
         [InlineKeyboardButton("💳 إدارة أرصدة المشاركين", callback_data="adm_credit")],
         [InlineKeyboardButton("📜 سجل حركة الرصيد",      callback_data="adm_tlog")],
+        [InlineKeyboardButton("🏆 إعدادات لوحة الشرف",   callback_data="adm_leaderboard")],
         [InlineKeyboardButton("⚙️ الإعدادات",             callback_data="adm_settings")],
     ])
 
@@ -1644,7 +1647,22 @@ async def credit_remove_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except ValueError:
         await update.message.reply_text("⚠️ أدخل رقماً صحيحاً أكبر من صفر.")
         return CREDIT_REMOVE
-    uid     = context.user_data.get("credit_uid")
+    context.user_data["credit_remove_amount"] = amount
+    await update.message.reply_text(
+        "📝 أدخل سبب الخصم (سيظهر للمتسابق)،\nأو اضغط «تخطي» للخصم بدون سبب:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ تخطي", callback_data="credit_remove_skip")],
+            [InlineKeyboardButton("⬅️ إلغاء", callback_data="credit_back")],
+        ]),
+    )
+    return CREDIT_REMOVE_REASON
+
+
+async def _do_credit_remove(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            reason: str):
+    """Perform the deduction, log it, and notify the player."""
+    uid    = context.user_data.get("credit_uid")
+    amount = context.user_data.pop("credit_remove_amount", 0)
     from storage import get_user as _gu
     user    = _gu(int(uid))
     balance = user.get("credits", 0)
@@ -1654,14 +1672,42 @@ async def credit_remove_handler(update: Update, context: ContextTypes.DEFAULT_TY
     log_credit_action(ADMIN_ID, uid, user.get("full_name", "—"), "remove", deducted, new_bal)
     try:
         from transactions import record as _rec
+        desc = f"خصم {deducted} نقطة بواسطة المشرف"
+        if reason:
+            desc += f" — السبب: {reason}"
         _rec(int(uid), user.get("full_name", "—"),
-             "admin_remove", deducted, balance, new_bal,
-             f"خصم {deducted} نقطة بواسطة المشرف")
+             "admin_remove", deducted, balance, new_bal, desc)
     except Exception as _e:
         logger.warning("transaction record failed: %s", _e)
+
+    # Notify the player immediately.
+    try:
+        reason_line = f"\n\nالسبب:\n{reason}" if reason else ""
+        await context.bot.send_message(
+            chat_id=int(uid),
+            text=(
+                "⚠️ تم خصم نقاط من رصيدك.\n\n"
+                f"الخصم:\n{deducted} نقطة"
+                f"{reason_line}\n\n"
+                f"رصيدك الحالي:\n{new_bal} نقطة"
+            ),
+        )
+    except Exception as _e:
+        logger.warning("Player penalty notification failed: %s", _e)
+
     note = f" (الرصيد كان {balance} فقط)" if deducted < amount else ""
     return await _show_credit_user(update, uid, context,
                                    prefix=f"✅ تم خصم *{deducted}* نقطة.{note}")
+
+
+async def credit_remove_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reason = update.message.text.strip()
+    return await _do_credit_remove(update, context, reason)
+
+
+async def credit_remove_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _do_credit_remove(update, context, "")
 
 
 async def cb_credit_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1977,6 +2023,108 @@ async def hint_cost_val_handler(update: Update, context: ContextTypes.DEFAULT_TY
     return SETTINGS
 
 
+# ── Leaderboard settings ──────────────────────────────────────────────────────
+
+def _lb_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👁 إظهار لوحة الشرف", callback_data="lb_show")],
+        [InlineKeyboardButton("🙈 إخفاء لوحة الشرف", callback_data="lb_hide")],
+        [InlineKeyboardButton("🔢 عدد المتصدرين",    callback_data="lb_count")],
+        [InlineKeyboardButton("🔙 رجوع",              callback_data="adm_main")],
+    ])
+
+
+def _lb_status_text() -> str:
+    from storage import get_leaderboard_visible, get_leaderboard_count
+    visible = get_leaderboard_visible()
+    count   = get_leaderboard_count()
+    status  = "👁 ظاهرة" if visible else "🙈 مخفية"
+    return (
+        "🏆 *إعدادات لوحة الشرف*\n\n"
+        f"*الحالة:* {status}\n"
+        f"*عدد المتصدرين:* {count}"
+    )
+
+
+async def cb_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update, _lb_status_text(), _lb_kb())
+    return LB_MENU
+
+
+async def cb_lb_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_leaderboard_visible
+    set_leaderboard_visible(True)
+    await update.callback_query.answer("✅ تم إظهار لوحة الشرف.")
+    await _reply(update, "✅ تم إظهار لوحة الشرف.\n\n" + _lb_status_text(), _lb_kb())
+    return LB_MENU
+
+
+async def cb_lb_hide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from storage import set_leaderboard_visible
+    set_leaderboard_visible(False)
+    await update.callback_query.answer("✅ تم إخفاء لوحة الشرف.")
+    await _reply(update, "✅ تم إخفاء لوحة الشرف.\n\n" + _lb_status_text(), _lb_kb())
+    return LB_MENU
+
+
+async def cb_lb_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    from storage import get_leaderboard_count
+    current = get_leaderboard_count()
+    await _reply(update,
+        f"🔢 *عدد المتصدرين*\n\nالعدد الحالي: *{current}*\n\nاختر العدد المطلوب إظهاره:",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("3",  callback_data="lb_count_3"),
+             InlineKeyboardButton("5",  callback_data="lb_count_5")],
+            [InlineKeyboardButton("10", callback_data="lb_count_10"),
+             InlineKeyboardButton("20", callback_data="lb_count_20")],
+            [InlineKeyboardButton("✏️ عدد مخصص", callback_data="lb_count_custom")],
+            [InlineKeyboardButton("🔙 رجوع",      callback_data="adm_leaderboard")],
+        ])
+    )
+    return LB_MENU
+
+
+async def cb_lb_count_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = int(update.callback_query.data[len("lb_count_"):])
+    from storage import set_leaderboard_count
+    set_leaderboard_count(count)
+    await update.callback_query.answer(f"✅ تم ضبط العدد على {count}.")
+    await _reply(update, f"✅ تم ضبط عدد المتصدرين على *{count}*.\n\n" + _lb_status_text(),
+                 _lb_kb())
+    return LB_MENU
+
+
+async def cb_lb_count_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update,
+        "✏️ أرسل عدد المتصدرين المطلوب إظهاره.",
+        InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 رجوع", callback_data="adm_leaderboard")
+        ]])
+    )
+    return LB_COUNT_CUSTOM
+
+
+async def lb_count_custom_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        count = int(update.message.text.strip())
+        if count <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أدخل رقماً صحيحاً أكبر من صفر.")
+        return LB_COUNT_CUSTOM
+    from storage import set_leaderboard_count
+    set_leaderboard_count(count)
+    await update.message.reply_text(
+        f"✅ تم ضبط عدد المتصدرين على *{count}*.\n\n" + _lb_status_text(),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_lb_kb(),
+    )
+    return LB_MENU
+
+
 # ── Cancel ────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2011,6 +2159,22 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(cb_settings,      pattern="^adm_settings$"),
                 CallbackQueryHandler(cb_credit_manage, pattern="^adm_credit$"),
                 CallbackQueryHandler(cb_tlog_main,     pattern="^adm_tlog$"),
+                CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
+            ],
+            # ── Leaderboard settings
+            LB_MENU: [
+                CallbackQueryHandler(cb_lb_show,         pattern="^lb_show$"),
+                CallbackQueryHandler(cb_lb_hide,         pattern="^lb_hide$"),
+                CallbackQueryHandler(cb_lb_count,        pattern="^lb_count$"),
+                CallbackQueryHandler(cb_lb_count_set,    pattern=r"^lb_count_\d+$"),
+                CallbackQueryHandler(cb_lb_count_custom, pattern="^lb_count_custom$"),
+                CallbackQueryHandler(cb_leaderboard,     pattern="^adm_leaderboard$"),
+                back,
+            ],
+            LB_COUNT_CUSTOM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lb_count_custom_handler),
+                CallbackQueryHandler(cb_leaderboard, pattern="^adm_leaderboard$"),
+                back,
             ],
             # ── Add new day
             ADD_NAME: [
@@ -2182,6 +2346,12 @@ def build_admin_handler() -> ConversationHandler:
             CREDIT_REMOVE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, credit_remove_handler),
                 CallbackQueryHandler(credit_back, pattern="^credit_back$"),
+                back,
+            ],
+            CREDIT_REMOVE_REASON: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, credit_remove_reason_handler),
+                CallbackQueryHandler(credit_remove_skip, pattern="^credit_remove_skip$"),
+                CallbackQueryHandler(credit_back,        pattern="^credit_back$"),
                 back,
             ],
             CREDIT_RESET_CONFIRM: [

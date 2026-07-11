@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 TYPE_LABELS: dict[str, str] = {
     "recharge_code": "شحن بكود",
     "hint_purchase":  "كشف حرف",
+    "word_reward":    "مكافأة فتح كلمة",
     "admin_add":      "إضافة بواسطة المشرف",
     "admin_remove":   "خصم بواسطة المشرف",
     "admin_reset":    "تصفير بواسطة المشرف",
@@ -26,6 +27,7 @@ TYPE_LABELS: dict[str, str] = {
 _ARROW: dict[str, str] = {
     "recharge_code": "➕",
     "hint_purchase":  "➖",
+    "word_reward":    "➕",
     "admin_add":      "➕",
     "admin_remove":   "➖",
     "admin_reset":    "🔄",
@@ -34,6 +36,7 @@ _ARROW: dict[str, str] = {
 _SIGN: dict[str, str] = {
     "recharge_code": "+",
     "hint_purchase":  "-",
+    "word_reward":    "+",
     "admin_add":      "+",
     "admin_remove":   "-",
     "admin_reset":    "±",

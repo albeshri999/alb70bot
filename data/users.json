@@ -35,8 +35,8 @@
   "8847623123": {
     "user_id": 8847623123,
     "full_name": "اباا صالح",
-    "state": "main_menu",
-    "selected_day": null,
+    "state": "awaiting_password",
+    "selected_day": "1",
     "password_step": 0,
     "password_attempts": 0,
     "locked_until": null,
@@ -45,8 +45,23 @@
     "username": "",
     "hint_step": -1,
     "hint_revealed": [],
-    "day_started_at": "2026-07-07T04:34:41.004528",
+    "day_started_at": "2026-07-11T03:40:30.890971",
     "completed_at": "2026-07-07T04:34:55.273598",
-    "last_seen": "2026-07-07T04:34:59.826466"
+    "last_seen": "2026-07-11T03:40:27.170041",
+    "credits": 120,
+    "word_reveals": {
+      "1:0": 5,
+      "1:1": 1
+    },
+    "word_status": {
+      "1:0": {
+        "status": "in_progress",
+        "revealed": 5,
+        "reward_granted": false,
+        "reward_blocked": false,
+        "completed_at": null,
+        "attempts": 0
+      }
+    }
   }
 }

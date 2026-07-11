@@ -78,6 +78,26 @@ def set_hint_cost(cost: int) -> None:
     save_config(cfg)
 
 
+def get_leaderboard_visible() -> bool:
+    return bool(load_config().get("leaderboard_visible", True))
+
+
+def set_leaderboard_visible(visible: bool) -> None:
+    cfg = load_config()
+    cfg["leaderboard_visible"] = bool(visible)
+    save_config(cfg)
+
+
+def get_leaderboard_count() -> int:
+    return int(load_config().get("leaderboard_count", 10))
+
+
+def set_leaderboard_count(count: int) -> None:
+    cfg = load_config()
+    cfg["leaderboard_count"] = int(count)
+    save_config(cfg)
+
+
 def load_credit_log() -> list:
     return _load_json(CREDIT_LOG_FILE, [])
 

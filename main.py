@@ -9,6 +9,7 @@ from storage import migrate_days
 from handlers import (
     start, handle_message, handle_day_selection, participants, unlock,
     handle_menu_competition, handle_menu_credit, handle_menu_balance,
+    handle_menu_leaderboard, handle_word_next,
     handle_hint, handle_back_to_main, handle_back_to_days,
     handle_notif_user, handle_notif_tlog, handle_notif_results,
 )
@@ -46,9 +47,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_competition, pattern="^menu_competition$"))
     app.add_handler(CallbackQueryHandler(handle_menu_credit,      pattern="^menu_credit$"))
     app.add_handler(CallbackQueryHandler(handle_menu_balance,     pattern="^menu_balance$"))
+    app.add_handler(CallbackQueryHandler(handle_menu_leaderboard, pattern="^menu_leaderboard$"))
 
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))
+
+    # Next-word button (after a word is already completed)
+    app.add_handler(CallbackQueryHandler(handle_word_next, pattern="^word_next$"))
 
     # Back navigation
     app.add_handler(CallbackQueryHandler(handle_back_to_main, pattern="^back_to_main$"))
