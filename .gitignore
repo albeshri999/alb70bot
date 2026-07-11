@@ -1,8 +1,0 @@
-venv/
-__pycache__/
-*.pyc
-
-data/users.json
-data/transactions.json
-data/credit_log.json
-data/admin_log.json
