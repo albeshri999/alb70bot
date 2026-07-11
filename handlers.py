@@ -32,12 +32,19 @@ ENCOURAGEMENTS = [
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("🏆 الدخول للمسابقة", callback_data="menu_competition")],
         [InlineKeyboardButton("💳 شحن الرصيد",      callback_data="menu_credit"),
          InlineKeyboardButton("💰 معرفة الرصيد",    callback_data="menu_balance")],
         [InlineKeyboardButton("🏆 لوحة الشرف",      callback_data="menu_leaderboard")],
-    ])
+    ]
+    try:
+        from quiz_storage import has_visible_quizzes
+        if has_visible_quizzes():
+            rows.append([InlineKeyboardButton("📝 الاختبارات", callback_data="menu_quizzes")])
+    except Exception:
+        pass
+    return InlineKeyboardMarkup(rows)
 
 
 def _back_to_main_kb() -> InlineKeyboardMarkup:

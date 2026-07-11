@@ -14,6 +14,10 @@ from handlers import (
     handle_notif_user, handle_notif_tlog, handle_notif_results,
 )
 from admin import build_admin_handler
+from quiz_admin import build_quiz_admin_handler
+from quiz_user import (
+    handle_menu_quizzes, handle_quiz_view, handle_quiz_start, handle_quiz_answer,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -38,6 +42,9 @@ def main() -> None:
     # Admin ConversationHandler
     app.add_handler(build_admin_handler())
 
+    # Quiz Management — fully independent ConversationHandler (📝 إدارة الاختبارات)
+    app.add_handler(build_quiz_admin_handler())
+
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("participants", participants))
@@ -48,6 +55,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_credit,      pattern="^menu_credit$"))
     app.add_handler(CallbackQueryHandler(handle_menu_balance,     pattern="^menu_balance$"))
     app.add_handler(CallbackQueryHandler(handle_menu_leaderboard, pattern="^menu_leaderboard$"))
+
+    # Quiz Management — participant-facing (📝 الاختبارات), fully independent
+    app.add_handler(CallbackQueryHandler(handle_menu_quizzes, pattern="^menu_quizzes$"))
+    app.add_handler(CallbackQueryHandler(handle_quiz_view,    pattern=r"^qz_view_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_quiz_start,   pattern=r"^qz_start_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_quiz_answer,  pattern=r"^qz_ans_(a|b)$"))
 
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))

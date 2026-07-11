@@ -96,6 +96,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 الإحصائيات",           callback_data="adm_stats"),
          InlineKeyboardButton("📤 تصدير Excel",          callback_data="adm_export")],
         [InlineKeyboardButton("📅 إدارة المسابقات",      callback_data="adm_manage_days")],
+        [InlineKeyboardButton("📝 إدارة الاختبارات",     callback_data="adm_quizzes")],
         [InlineKeyboardButton("📅 إدارة أيام المسابقة",  callback_data="adm_days_toggle")],
         [InlineKeyboardButton("➕ إضافة يوم جديد",      callback_data="adm_add_day"),
          InlineKeyboardButton("🗑 حذف يوم",              callback_data="adm_delete_day")],
