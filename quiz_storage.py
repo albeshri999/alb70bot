@@ -15,9 +15,10 @@ import json
 import os
 from datetime import datetime
 
-QUIZZES_FILE       = "data/quizzes.json"
-QUIZ_RESULTS_FILE  = "data/quiz_results.json"
-QUIZ_SESSIONS_FILE = "data/quiz_sessions.json"
+QUIZZES_FILE          = "data/quizzes.json"
+QUIZ_RESULTS_FILE     = "data/quiz_results.json"
+QUIZ_SESSIONS_FILE    = "data/quiz_sessions.json"
+QUIZ_CREDIT_LOG_FILE  = "data/quiz_credit_log.json"
 
 
 def _load_json(filepath: str, default):
@@ -128,6 +129,10 @@ def delete_quiz(quiz_id) -> bool:
         new_sessions = {u: s for u, s in sessions.items() if str(s.get("quiz_id")) != key}
         if len(new_sessions) != len(sessions):
             save_sessions(new_sessions)
+        credit_log = load_credit_log()
+        if key in credit_log:
+            del credit_log[key]
+            save_credit_log(credit_log)
         return True
     return False
 
@@ -204,6 +209,49 @@ def results_for_quiz(quiz_id) -> list:
 
 def has_taken_quiz(quiz_id, user_id) -> bool:
     return any(str(r.get("user_id")) == str(user_id) for r in results_for_quiz(quiz_id))
+
+
+def latest_results_by_user(quiz_id) -> dict:
+    """Map user_id -> that user's most recent finished attempt for this quiz.
+
+    Every finished attempt is appended to QUIZ_RESULTS_FILE in chronological
+    order (see quiz_user._finish_quiz), so the last entry seen for a given
+    user while scanning the list is always their latest attempt — this is
+    what lets retakes be resolved to 'the latest attempt only', per the
+    quiz-results-crediting feature.
+    """
+    latest: dict = {}
+    for r in results_for_quiz(quiz_id):
+        latest[str(r.get("user_id"))] = r
+    return latest
+
+
+# ── Results-crediting log (which attempt's points were already added to a
+# participant's balance) ─────────────────────────────────────────────────────
+# Kept in its own file, independent of everything else, so that recalculating
+# a quiz's results never touches days.json/users.json/credit_log.json/etc.
+# directly — only quiz_admin.py reads this to decide what to add/remove via
+# the existing credits.add_credits()/transactions.record() functions.
+
+def load_credit_log() -> dict:
+    return _load_json(QUIZ_CREDIT_LOG_FILE, {})
+
+
+def save_credit_log(data: dict) -> None:
+    _save_json(QUIZ_CREDIT_LOG_FILE, data)
+
+
+def get_credited_entry(quiz_id, user_id):
+    """Return {'score': int, 'finished_at': str} for the last attempt of this
+    user+quiz that had its points credited to the balance, or None."""
+    return load_credit_log().get(str(quiz_id), {}).get(str(user_id))
+
+
+def set_credited_entry(quiz_id, user_id, score: int, finished_at) -> None:
+    log = load_credit_log()
+    quiz_log = log.setdefault(str(quiz_id), {})
+    quiz_log[str(user_id)] = {"score": score, "finished_at": finished_at}
+    save_credit_log(log)
 
 
 # ── Active sessions (in-progress attempts) ───────────────────────────────────

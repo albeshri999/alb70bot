@@ -22,6 +22,8 @@ TYPE_LABELS: dict[str, str] = {
     "admin_add":      "إضافة بواسطة المشرف",
     "admin_remove":   "خصم بواسطة المشرف",
     "admin_reset":    "تصفير بواسطة المشرف",
+    "quiz_result_add":    "نتيجة اختبار",
+    "quiz_result_remove": "إزالة نتيجة اختبار سابقة",
 }
 
 _ARROW: dict[str, str] = {
@@ -31,6 +33,8 @@ _ARROW: dict[str, str] = {
     "admin_add":      "➕",
     "admin_remove":   "➖",
     "admin_reset":    "🔄",
+    "quiz_result_add":    "🏆",
+    "quiz_result_remove": "♻️",
 }
 
 _SIGN: dict[str, str] = {
@@ -40,6 +44,8 @@ _SIGN: dict[str, str] = {
     "admin_add":      "+",
     "admin_remove":   "-",
     "admin_reset":    "±",
+    "quiz_result_add":    "+",
+    "quiz_result_remove": "-",
 }
 
 

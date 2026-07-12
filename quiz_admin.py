@@ -30,6 +30,8 @@ from telegram.constants import ParseMode
 import admins_store
 from storage import get_user
 import quiz_storage as qs
+import credits
+import transactions
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,7 @@ def _hub_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗑 حذف اختبار", callback_data="qa_list_delete")],
         [InlineKeyboardButton("👁 إظهار / إخفاء اختبار", callback_data="qa_list_toggle")],
         [InlineKeyboardButton("📊 نتائج الاختبارات", callback_data="qa_list_results")],
+        [InlineKeyboardButton("🏆 حساب نتائج الاختبار", callback_data="qa_list_credit")],
         [InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")],
     ])
 
@@ -120,7 +123,7 @@ def _quiz_list_kb() -> InlineKeyboardMarkup:
 async def qa_list_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     await query.answer()
-    action = query.data.replace("qa_list_", "")  # menu | edit | delete | toggle | results
+    action = query.data.replace("qa_list_", "")  # menu | edit | delete | toggle | results | credit
     context.user_data["qa_action"] = action
 
     quizzes = qs.load_quizzes()
@@ -146,6 +149,8 @@ async def qa_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _show_delete_confirm(update, context)
     if action == "results":
         return await _show_results(update, context)
+    if action == "credit":
+        return await _compute_and_credit_quiz(update, context)
     return await _show_quiz_menu(update, context)
 
 
@@ -296,6 +301,90 @@ async def _show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def qa_show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     return await _show_results(update, context)
+
+
+# ── Compute results & add points to balances ("🏆 حساب نتائج الاختبار") ──────
+#
+# Rules implemented here:
+#  1. Every participant's *latest* attempt only is considered (retakes never
+#     stack — see quiz_storage.latest_results_by_user).
+#  2. If a participant's latest attempt was already credited before, nothing
+#     happens for them this run.
+#  3. If a participant retook the quiz since it was last credited, their
+#     previously-credited score is first removed from their balance, then
+#     their new score is added — so the net effect is exactly the difference
+#     between the two (which can be negative if the new score is lower).
+#  4. If NO participant has a new, not-yet-credited attempt, the whole run is
+#     a no-op and the admin is told the quiz's results were already credited.
+
+async def _compute_and_credit_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    quiz_id = context.user_data.get("qa_quiz_id")
+    quiz    = qs.get_quiz(quiz_id)
+    if not quiz:
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return QA_HUB
+
+    latest_by_user      = qs.latest_results_by_user(quiz_id)
+    participants_count  = len(latest_by_user)
+    updated_count       = 0
+    net_points_added     = 0
+
+    for user_id, result in latest_by_user.items():
+        finished_at = result.get("finished_at")
+        already     = qs.get_credited_entry(quiz_id, user_id)
+
+        # This exact attempt was already credited — skip, no double-adding.
+        if already and already.get("finished_at") == finished_at:
+            continue
+
+        new_score = int(result.get("score", 0))
+        user_obj  = get_user(int(user_id)) or {}
+        full_name = result.get("user_name") or user_obj.get("full_name") or "—"
+        quiz_name = quiz.get("name", "—")
+
+        if already:
+            # Retake: remove the previously credited score first.
+            old_score  = int(already.get("score", 0))
+            bal_before = credits.get_balance(int(user_id))
+            bal_after  = credits.add_credits(int(user_id), -old_score)
+            transactions.record(
+                int(user_id), full_name, "quiz_result_remove",
+                old_score, bal_before, bal_after,
+                f"إزالة نتيجة سابقة لاختبار: {quiz_name}",
+            )
+            net_points_added -= old_score
+
+        bal_before = credits.get_balance(int(user_id))
+        bal_after  = credits.add_credits(int(user_id), new_score)
+        transactions.record(
+            int(user_id), full_name, "quiz_result_add",
+            new_score, bal_before, bal_after,
+            f"نتيجة اختبار: {quiz_name}",
+        )
+        net_points_added += new_score
+
+        qs.set_credited_entry(quiz_id, user_id, new_score, finished_at)
+        updated_count += 1
+
+    if updated_count == 0:
+        await _reply(
+            update,
+            "⚠️ *تم احتساب نتائج هذا الاختبار مسبقاً.*",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="qa_hub")]]),
+        )
+        return QA_HUB
+
+    text = (
+        "✅ *تم احتساب نتائج الاختبار بنجاح.*\n\n"
+        f"👥 عدد المشاركين: *{participants_count}*\n"
+        f"➕ عدد الذين تمت إضافة درجاتهم: *{updated_count}*\n"
+        f"🏆 إجمالي النقاط المضافة: *{net_points_added}*"
+    )
+    await _reply(
+        update, text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="qa_hub")]]),
+    )
+    return QA_HUB
 
 
 # ── Create new quiz ───────────────────────────────────────────────────────────
@@ -735,7 +824,7 @@ async def qa_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_quiz_admin_handler() -> ConversationHandler:
     hub_reentry = CallbackQueryHandler(qa_hub, pattern="^qa_hub$")
-    list_entry  = CallbackQueryHandler(qa_list_entry, pattern=r"^qa_list_(menu|edit|delete|toggle|results)$")
+    list_entry  = CallbackQueryHandler(qa_list_entry, pattern=r"^qa_list_(menu|edit|delete|toggle|results|credit)$")
 
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(qa_hub, pattern="^adm_quizzes$")],
