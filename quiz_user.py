@@ -130,10 +130,15 @@ async def _timer_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         job.schedule_removal()
         return
 
+    sq = qs.get_shuffled_question(quiz, session, index)
+    if not sq:
+        job.schedule_removal()
+        return
+
     try:
         await context.bot.edit_message_text(
             chat_id=data["chat_id"], message_id=data["message_id"],
-            text=_question_text(quiz, index, remaining),
+            text=_question_text(quiz, sq, index, remaining),
             parse_mode=ParseMode.MARKDOWN, reply_markup=_question_kb(),
         )
     except Exception as e:
@@ -221,16 +226,15 @@ def _question_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def _question_text(quiz: dict, index: int, remaining=None) -> str:
-    q = quiz["questions"][index]
+def _question_text(quiz: dict, sq: dict, index: int, remaining=None) -> str:
     n = len(quiz["questions"])
     header = f"⏳ الوقت المتبقي:\n*{_fmt_timer(remaining)}*\n\n" if remaining is not None else ""
     return (
         f"{header}"
         f"📝 *{quiz.get('name')}*  —  السؤال {index + 1}/{n}\n\n"
-        f"{q.get('question', '')}\n\n"
-        f"أ) {q.get('option_a', '')}\n"
-        f"ب) {q.get('option_b', '')}"
+        f"{sq.get('question', '')}\n\n"
+        f"أ) {sq.get('option_a', '')}\n"
+        f"ب) {sq.get('option_b', '')}"
     )
 
 
@@ -254,8 +258,9 @@ async def handle_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     await query.answer()
-    qs.start_session(user_id, quiz_id)
-    await _edit(update, _question_text(quiz, 0, remaining), _question_kb())
+    session = qs.start_session(user_id, quiz_id)
+    sq = qs.get_shuffled_question(quiz, session, 0)
+    await _edit(update, _question_text(quiz, sq, 0, remaining), _question_kb())
 
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)
@@ -348,7 +353,8 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _finish_quiz(update, context, user_id, quiz, session)
         return
 
-    correct_choice = questions[index].get("correct")
+    sq             = qs.get_shuffled_question(quiz, session, index)
+    correct_choice = sq.get("correct") if sq else None
     is_correct     = (choice == correct_choice)
 
     answers = list(session.get("answers", []))
@@ -364,6 +370,7 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _finish_quiz(update, context, user_id, quiz, session)
         return
 
-    await _edit(update, _question_text(quiz, next_index, remaining), _question_kb())
+    sq_next = qs.get_shuffled_question(quiz, session, next_index)
+    await _edit(update, _question_text(quiz, sq_next, next_index, remaining), _question_kb())
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)

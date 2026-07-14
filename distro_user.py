@@ -125,10 +125,15 @@ async def _timer_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         job.schedule_removal()
         return
 
+    sq = ds.get_shuffled_question(quiz, session, index)
+    if not sq:
+        job.schedule_removal()
+        return
+
     try:
         await context.bot.edit_message_text(
             chat_id=data["chat_id"], message_id=data["message_id"],
-            text=_question_text(quiz, index, remaining),
+            text=_question_text(quiz, sq, index, remaining),
             parse_mode=ParseMode.MARKDOWN, reply_markup=_question_kb(),
         )
     except Exception as e:
@@ -182,13 +187,24 @@ async def handle_distro_view(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if not ds.is_entry_open(quiz):
+        await _edit(
+            update,
+            f"👥 *{quiz.get('name')}*\n\n"
+            "🚪 الدخول لهذا الاختبار مغلق حالياً من قبل المشرف.",
+            _back_kb("menu_distro"),
+        )
+        return
+
     n_q = len(quiz.get("questions", []))
     if remaining is not None:
         time_line = f"⏳ الوقت المتبقي حتى إغلاق الاختبار: *{_fmt_timer(remaining)}*"
     else:
         time_line = "⏱ الوقت: بدون تحديد"
-    lines = [
-        f"👥 *{quiz.get('name')}*",
+    lines = [f"👥 *{quiz.get('name')}*"]
+    if quiz.get("description"):
+        lines.append(f"_{quiz['description']}_")
+    lines += [
         "",
         f"❓ عدد الأسئلة: *{n_q}*",
         time_line,
@@ -214,16 +230,15 @@ def _question_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def _question_text(quiz: dict, index: int, remaining=None) -> str:
-    q = quiz["questions"][index]
+def _question_text(quiz: dict, sq: dict, index: int, remaining=None) -> str:
     n = len(quiz["questions"])
     header = f"⏳ الوقت المتبقي:\n*{_fmt_timer(remaining)}*\n\n" if remaining is not None else ""
     return (
         f"{header}"
         f"👥 *{quiz.get('name')}*  —  السؤال {index + 1}/{n}\n\n"
-        f"{q.get('question', '')}\n\n"
-        f"أ) {q.get('option_a', '')}\n"
-        f"ب) {q.get('option_b', '')}"
+        f"{sq.get('question', '')}\n\n"
+        f"أ) {sq.get('option_a', '')}\n"
+        f"ب) {sq.get('option_b', '')}"
     )
 
 
@@ -239,6 +254,9 @@ async def handle_distro_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     if ds.has_taken_quiz(quiz_id, user_id):
         await query.answer("✅ لقد قمت بحل هذا الاختبار مسبقاً.", show_alert=True)
         return
+    if not ds.is_entry_open(quiz):
+        await query.answer("🚪 الدخول لهذا الاختبار مغلق حالياً.", show_alert=True)
+        return
 
     remaining = ds.remaining_seconds(quiz)
     if remaining is not None and remaining <= 0:
@@ -247,8 +265,9 @@ async def handle_distro_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await query.answer()
-    ds.start_session(user_id, quiz_id)
-    await _edit(update, _question_text(quiz, 0, remaining), _question_kb())
+    session = ds.start_session(user_id, quiz_id)
+    sq = ds.get_shuffled_question(quiz, session, 0)
+    await _edit(update, _question_text(quiz, sq, 0, remaining), _question_kb())
 
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)
@@ -262,6 +281,9 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
     n_q           = len(quiz.get("questions", []))
     correct_count = session.get("correct_count", 0)
     wrong_count   = n_q - correct_count
+    points_each   = int(quiz.get("points_per_question", 0))
+    score         = correct_count * points_each
+    total_points  = n_q * points_each
     percentage    = round((correct_count / n_q) * 100, 1) if n_q else 0.0
 
     started_at = session.get("started_at")
@@ -276,8 +298,8 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "quiz_id":     str(quiz_id),
         "user_id":     str(user_id),
         "user_name":   user.get("full_name") or "—",
-        "score":       correct_count,
-        "total_score": n_q,
+        "score":       score,
+        "total_score": total_points,
         "correct":     correct_count,
         "wrong":       wrong_count,
         "percentage":  percentage,
@@ -333,7 +355,8 @@ async def handle_distro_answer(update: Update, context: ContextTypes.DEFAULT_TYP
         await _finish_quiz(update, context, user_id, quiz, session)
         return
 
-    correct_choice = questions[index].get("correct")
+    sq             = ds.get_shuffled_question(quiz, session, index)
+    correct_choice = sq.get("correct") if sq else None
     is_correct     = (choice == correct_choice)
 
     answers = list(session.get("answers", []))
@@ -349,6 +372,7 @@ async def handle_distro_answer(update: Update, context: ContextTypes.DEFAULT_TYP
         await _finish_quiz(update, context, user_id, quiz, session)
         return
 
-    await _edit(update, _question_text(quiz, next_index, remaining), _question_kb())
+    sq_next = ds.get_shuffled_question(quiz, session, next_index)
+    await _edit(update, _question_text(quiz, sq_next, next_index, remaining), _question_kb())
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)

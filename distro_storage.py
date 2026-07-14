@@ -22,6 +22,7 @@ All data lives in its own JSON files under data/:
 """
 import json
 import os
+import random
 from datetime import datetime
 
 DISTRO_QUIZZES_FILE  = "data/distro_quizzes.json"
@@ -86,14 +87,21 @@ def next_quiz_id() -> str:
     return str((max(nums) + 1) if nums else 1)
 
 
-def create_quiz(name: str, timed: bool, time_minutes, visible: bool) -> str:
+def create_quiz(name: str, description: str, points_per_question: int,
+                 timed: bool, time_minutes, visible: bool) -> str:
     quiz_id = next_quiz_id()
     save_quiz(quiz_id, {
         "id": quiz_id,
         "name": name,
+        "description": description or "",
+        "points_per_question": points_per_question,
         "timed": bool(timed),
         "time_minutes": time_minutes if timed else None,
         "visible": bool(visible),
+        # "الدخول" is independent of "visible": a hidden test never appears
+        # to participants at all, while a visible-but-closed test still
+        # appears in the list but blocks starting a new attempt.
+        "entry_open": True,
         # Countdown clock (timed tests) is anchored to the moment the test
         # becomes visible — same convention as the existing quiz system, so
         # every participant shares the same deadline.
@@ -102,6 +110,13 @@ def create_quiz(name: str, timed: bool, time_minutes, visible: bool) -> str:
         "created_at": datetime.utcnow().isoformat(),
     })
     return quiz_id
+
+
+def update_quiz_field(quiz_id, **fields) -> None:
+    quiz = get_quiz(quiz_id)
+    if quiz:
+        quiz.update(fields)
+        save_quiz(quiz_id, quiz)
 
 
 def set_quiz_visible(quiz_id, visible: bool) -> None:
@@ -165,6 +180,37 @@ def add_question(quiz_id, question: str, option_a: str, option_b: str, correct: 
     save_quiz(quiz_id, quiz)
 
 
+def update_question(quiz_id, index: int, **fields) -> bool:
+    quiz = get_quiz(quiz_id)
+    questions = quiz.get("questions", [])
+    if 0 <= index < len(questions):
+        questions[index].update(fields)
+        quiz["questions"] = questions
+        save_quiz(quiz_id, quiz)
+        return True
+    return False
+
+
+def delete_question(quiz_id, index: int) -> bool:
+    quiz = get_quiz(quiz_id)
+    questions = quiz.get("questions", [])
+    if 0 <= index < len(questions):
+        questions.pop(index)
+        quiz["questions"] = questions
+        save_quiz(quiz_id, quiz)
+        return True
+    return False
+
+
+def set_entry_open(quiz_id, open_: bool) -> None:
+    update_quiz_field(quiz_id, entry_open=bool(open_))
+
+
+def is_entry_open(quiz: dict) -> bool:
+    """Defaults to True so older records (before this field existed) keep working."""
+    return bool(quiz.get("entry_open", True))
+
+
 def visible_quizzes() -> dict:
     return {k: v for k, v in load_quizzes().items() if v.get("visible")}
 
@@ -214,17 +260,62 @@ def get_session(user_id) -> dict:
 
 
 def start_session(user_id, quiz_id) -> dict:
+    """Start a new attempt. Each participant gets their own independent
+    randomized question order ('question_order') and, per question, an
+    independent coin-flip on whether its two options are swapped
+    ('option_swap') — see get_shuffled_question() below. Both are generated
+    once here and stay fixed for the rest of this attempt."""
+    quiz      = get_quiz(quiz_id)
+    n         = len(quiz.get("questions", []))
+    order     = list(range(n))
+    random.shuffle(order)
+    swap      = {str(i): random.choice([True, False]) for i in range(n)}
+
     sessions = load_sessions()
     session = {
         "quiz_id": str(quiz_id),
         "current_index": 0,
         "correct_count": 0,
         "answers": [],
+        "question_order": order,
+        "option_swap": swap,
         "started_at": datetime.utcnow().isoformat(),
     }
     sessions[str(user_id)] = session
     save_sessions(sessions)
     return session
+
+
+def get_shuffled_question(quiz: dict, session: dict, position: int):
+    """Return the question this PARTICIPANT sees at position `position` of
+    their attempt (0-based), with 'option_a'/'option_b'/'correct' already
+    adjusted for their personal per-question option swap. Returns None if
+    `position` is past the end. Scoring is unaffected because 'correct'
+    here always reflects the CURRENTLY DISPLAYED option lettering."""
+    questions = quiz.get("questions", [])
+    order = session.get("question_order") or list(range(len(questions)))
+    if position < 0 or position >= len(order):
+        return None
+    orig_index = order[position]
+    if orig_index >= len(questions):
+        return None
+    q = questions[orig_index]
+    swap = bool((session.get("option_swap") or {}).get(str(orig_index), False))
+    if swap:
+        option_a = q.get("option_b", "")
+        option_b = q.get("option_a", "")
+        correct  = "a" if q.get("correct") == "b" else "b"
+    else:
+        option_a = q.get("option_a", "")
+        option_b = q.get("option_b", "")
+        correct  = q.get("correct")
+    return {
+        "question":    q.get("question", ""),
+        "option_a":    option_a,
+        "option_b":    option_b,
+        "correct":     correct,
+        "orig_index":  orig_index,
+    }
 
 
 def update_session(user_id, **fields) -> dict:

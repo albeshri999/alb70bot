@@ -13,6 +13,7 @@ All quiz data lives in its own JSON files under data/:
 """
 import json
 import os
+import random
 from datetime import datetime
 
 QUIZZES_FILE          = "data/quizzes.json"
@@ -269,17 +270,62 @@ def get_session(user_id) -> dict:
 
 
 def start_session(user_id, quiz_id) -> dict:
+    """Start a new attempt. Each participant gets their own independent
+    randomized question order ('question_order') and, per question, an
+    independent coin-flip on whether its two options are swapped
+    ('option_swap') — see get_shuffled_question() below. Both are generated
+    once here and stay fixed for the rest of this attempt."""
+    quiz      = get_quiz(quiz_id)
+    n         = len(quiz.get("questions", []))
+    order     = list(range(n))
+    random.shuffle(order)
+    swap      = {str(i): random.choice([True, False]) for i in range(n)}
+
     sessions = load_sessions()
     session = {
         "quiz_id": str(quiz_id),
         "current_index": 0,
         "correct_count": 0,
         "answers": [],
+        "question_order": order,
+        "option_swap": swap,
         "started_at": datetime.utcnow().isoformat(),
     }
     sessions[str(user_id)] = session
     save_sessions(sessions)
     return session
+
+
+def get_shuffled_question(quiz: dict, session: dict, position: int):
+    """Return the question this PARTICIPANT sees at position `position` of
+    their attempt (0-based), with 'option_a'/'option_b'/'correct' already
+    adjusted for their personal per-question option swap. Returns None if
+    `position` is past the end. Scoring is unaffected because 'correct'
+    here always reflects the CURRENTLY DISPLAYED option lettering."""
+    questions = quiz.get("questions", [])
+    order = session.get("question_order") or list(range(len(questions)))
+    if position < 0 or position >= len(order):
+        return None
+    orig_index = order[position]
+    if orig_index >= len(questions):
+        return None
+    q = questions[orig_index]
+    swap = bool((session.get("option_swap") or {}).get(str(orig_index), False))
+    if swap:
+        option_a = q.get("option_b", "")
+        option_b = q.get("option_a", "")
+        correct  = "a" if q.get("correct") == "b" else "b"
+    else:
+        option_a = q.get("option_a", "")
+        option_b = q.get("option_b", "")
+        correct  = q.get("correct")
+    return {
+        "question":    q.get("question", ""),
+        "option_a":    option_a,
+        "option_b":    option_b,
+        "correct":     correct,
+        "orig_index":  orig_index,
+    }
 
 
 def update_session(user_id, **fields) -> dict:
