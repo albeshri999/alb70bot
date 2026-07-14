@@ -20,6 +20,10 @@ from quiz_user import (
     handle_menu_quizzes, handle_quiz_view, handle_quiz_start, handle_quiz_answer,
 )
 from admin_management import add_admin_cmd, remove_admin_cmd, list_admins_cmd
+from distro_admin import build_distro_admin_handler
+from distro_user import (
+    handle_menu_distro, handle_distro_view, handle_distro_start, handle_distro_answer,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -50,6 +54,10 @@ def main() -> None:
     # Admin Settings — owner-only ConversationHandler (⚙️ إعدادات المشرفين)
     app.add_handler(build_admin_settings_handler())
 
+    # Team-Distribution Test — fully independent ConversationHandler
+    # (👥 اختبار توزيع الفرق). No points/leaderboard interaction whatsoever.
+    app.add_handler(build_distro_admin_handler())
+
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("participants", participants))
@@ -71,6 +79,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_quiz_view,    pattern=r"^qz_view_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_quiz_start,   pattern=r"^qz_start_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_quiz_answer,  pattern=r"^qz_ans_(a|b)$"))
+
+    # Team-Distribution Test — participant-facing (👥 اختبار تنظيمي), fully
+    # independent of the quiz system above and never touches credits/leaderboard.
+    app.add_handler(CallbackQueryHandler(handle_menu_distro,   pattern="^menu_distro$"))
+    app.add_handler(CallbackQueryHandler(handle_distro_view,   pattern=r"^dz_view_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_distro_start,  pattern=r"^dz_start_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_distro_answer, pattern=r"^dz_ans_(a|b)$"))
 
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))

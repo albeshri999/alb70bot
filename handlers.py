@@ -45,6 +45,12 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton("📝 الاختبارات", callback_data="menu_quizzes")])
     except Exception:
         pass
+    try:
+        from distro_storage import has_visible_quizzes as has_visible_distro_quizzes
+        if has_visible_distro_quizzes():
+            rows.append([InlineKeyboardButton("👥 اختبار تنظيمي", callback_data="menu_distro")])
+    except Exception:
+        pass
     return InlineKeyboardMarkup(rows)
 
 
