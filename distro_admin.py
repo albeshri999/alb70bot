@@ -48,7 +48,9 @@ logger = logging.getLogger(__name__)
  DT_EDIT_MENU, DT_E_NAME, DT_E_DESC, DT_E_POINTS, DT_E_TIMED, DT_E_MINUTES,
  DT_E_Q_LIST, DT_E_Q_FIELD_MENU, DT_E_Q_FIELD_VAL, DT_E_Q_DEL_CONFIRM,
  DT_SPLIT_SIZE, DT_SPLIT_VIEW, DT_RESULTS_VIS,
- ) = range(28)
+ DT_RESULTS_MGMT_MENU, DT_RESULTS_DEL_USER_LIST, DT_RESULTS_DEL_USER_CONFIRM,
+ DT_RESULTS_DEL_ALL_CONFIRM,
+ ) = range(32)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -173,6 +175,7 @@ def _quiz_menu_kb(quiz: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(entry, callback_data="dt_toggle_entry")],
         [InlineKeyboardButton("👁 نتائج المتسابقين", callback_data="dt_results_vis_menu")],
         [InlineKeyboardButton("📊 النتائج", callback_data="dt_show_results")],
+        [InlineKeyboardButton("🗑 إدارة النتائج", callback_data="dt_results_mgmt_menu")],
         [InlineKeyboardButton("👥 تقسيم الفرق", callback_data="dt_goto_split")],
         [InlineKeyboardButton("🗑 حذف", callback_data="dt_delete_confirm")],
         [InlineKeyboardButton("🔙 رجوع لقائمة اختبارات التوزيع", callback_data="dt_list_menu")],
@@ -339,6 +342,129 @@ async def _show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dt_show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     return await _show_results(update, context)
+
+
+# ── Results management ("🗑 إدارة النتائج") ──────────────────────────────────
+#
+# Same two operations as the regular quiz system, adapted for this test:
+#   1. Delete ONE participant's result — wipes their score/answers/timing.
+#   2. Delete ALL results — same, for everyone, resets the test to "nobody
+#      has solved it yet" (this test has no allow_retake toggle, so this is
+#      the only way to let participants try again).
+# Neither ever touches any balance — this test never adds points. Both DO
+# clear any saved team split for this test (see ds.clear_team_split), so a
+# stale split can never be exported or mistaken for one that reflects the
+# current results — the admin simply re-runs "👥 تقسيم الفرق" afterwards.
+
+def _results_mgmt_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 حذف نتيجة متسابق", callback_data="dt_del_res_user_list")],
+        [InlineKeyboardButton("🗑 حذف جميع النتائج", callback_data="dt_del_res_all")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="dt_back_to_quiz_menu")],
+    ])
+
+
+async def dt_results_mgmt_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("dt_quiz_id")
+    if not ds.get_quiz(quiz_id):
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return DT_HUB
+    await _reply(update, "🗑 *إدارة النتائج*\n\nاختر العملية:", _results_mgmt_kb())
+    return DT_RESULTS_MGMT_MENU
+
+
+# ── Delete a single participant's result ─────────────────────────────────────
+
+async def dt_del_res_user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("dt_quiz_id")
+    results = ds.results_for_quiz(quiz_id)
+    latest: dict = {}
+    for r in results:
+        latest[str(r.get("user_id"))] = r
+    if not latest:
+        await _reply(
+            update, "📭 لا توجد نتائج بعد لهذا الاختبار.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="dt_results_mgmt_menu")]]),
+        )
+        return DT_RESULTS_MGMT_MENU
+    rows = [
+        [InlineKeyboardButton(r.get("user_name", "—"), callback_data=f"dt_delres_sel_{uid}")]
+        for uid, r in latest.items()
+    ]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="dt_results_mgmt_menu")])
+    await _reply(update, "🗑 *حذف نتيجة متسابق*\n\nاختر المتسابق:", InlineKeyboardMarkup(rows))
+    return DT_RESULTS_DEL_USER_LIST
+
+
+async def dt_delres_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    uid = update.callback_query.data.replace("dt_delres_sel_", "")
+    context.user_data["dt_delres_uid"] = uid
+    quiz_id = context.user_data.get("dt_quiz_id")
+    results = ds.results_for_quiz(quiz_id)
+    name = "—"
+    for r in results:
+        if str(r.get("user_id")) == uid:
+            name = r.get("user_name", "—")
+    await _reply(
+        update,
+        f"🗑 هل تريد حذف نتيجة هذا المتسابق؟\n\n*{_md(name)}*",
+        _yn("dt_delres_yes", "dt_del_res_user_list"),
+    )
+    return DT_RESULTS_DEL_USER_CONFIRM
+
+
+async def dt_delres_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("dt_quiz_id")
+    uid     = context.user_data.pop("dt_delres_uid", None)
+    quiz    = ds.get_quiz(quiz_id)
+    if not quiz or not uid:
+        await _reply(update, "⚠️ حدث خطأ. حاول مجدداً.", _hub_kb())
+        return DT_HUB
+
+    ds.delete_results_for_user(quiz_id, uid)
+    ds.clear_team_split(quiz_id)
+    await _reply(update, "✅ تم حذف نتيجة المتسابق بنجاح.", _quiz_menu_kb(quiz))
+    return DT_QUIZ_MENU
+
+
+# ── Delete ALL results for this test ─────────────────────────────────────────
+
+async def dt_del_res_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(
+        update,
+        "⚠️ سيتم حذف جميع نتائج اختبار التوزيع هذا لجميع المتسابقين.\n"
+        "هذا الاختبار لا يضيف نقاطاً للرصيد أصلاً، لذا لن تتأثر أي أرصدة.\n"
+        "كما سيتم حذف بيانات تقسيم الفرق المحفوظة لهذا الاختبار.\n\n"
+        "هل تريد المتابعة؟",
+        _yn("dt_del_res_all_yes", "dt_results_mgmt_menu"),
+    )
+    return DT_RESULTS_DEL_ALL_CONFIRM
+
+
+async def dt_del_res_all_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("dt_quiz_id")
+    quiz    = ds.get_quiz(quiz_id)
+    if not quiz:
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return DT_HUB
+
+    removed = ds.delete_all_results(quiz_id)
+    ds.clear_team_split(quiz_id)
+
+    await _reply(
+        update,
+        f"✅ تم حذف جميع نتائج اختبار التوزيع ({removed} نتيجة).\n"
+        "تم أيضاً حذف بيانات تقسيم الفرق المحفوظة — يمكن للمتسابقين حل الاختبار "
+        "من جديد ويمكنك إعادة التقسيم بناءً على النتائج الجديدة.",
+        _quiz_menu_kb(quiz),
+    )
+    return DT_QUIZ_MENU
 
 
 # ── Team split ("👥 تقسيم الفرق") ─────────────────────────────────────────────
@@ -918,6 +1044,7 @@ def build_distro_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(dt_toggle_entry,       pattern="^dt_toggle_entry$"),
                 CallbackQueryHandler(dt_results_vis_menu,   pattern="^dt_results_vis_menu$"),
                 CallbackQueryHandler(dt_show_results,       pattern="^dt_show_results$"),
+                CallbackQueryHandler(dt_results_mgmt_menu,  pattern="^dt_results_mgmt_menu$"),
                 CallbackQueryHandler(dt_goto_split,         pattern="^dt_goto_split$"),
                 CallbackQueryHandler(dt_delete_confirm,     pattern="^dt_delete_confirm$"),
                 CallbackQueryHandler(dt_back_to_quiz_menu,  pattern="^dt_back_to_quiz_menu$"),
@@ -1010,6 +1137,28 @@ def build_distro_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(dt_results_vis_on,  pattern="^dt_results_vis_on$"),
                 CallbackQueryHandler(dt_results_vis_off, pattern="^dt_results_vis_off$"),
                 CallbackQueryHandler(dt_back_to_quiz_menu, pattern="^dt_back_to_quiz_menu$"),
+                hub_reentry,
+            ],
+            # ── Results management ("🗑 إدارة النتائج") ──
+            DT_RESULTS_MGMT_MENU: [
+                CallbackQueryHandler(dt_del_res_user_list, pattern="^dt_del_res_user_list$"),
+                CallbackQueryHandler(dt_del_res_all,       pattern="^dt_del_res_all$"),
+                CallbackQueryHandler(dt_back_to_quiz_menu, pattern="^dt_back_to_quiz_menu$"),
+                hub_reentry,
+            ],
+            DT_RESULTS_DEL_USER_LIST: [
+                CallbackQueryHandler(dt_delres_sel,        pattern=r"^dt_delres_sel_\w+$"),
+                CallbackQueryHandler(dt_results_mgmt_menu, pattern="^dt_results_mgmt_menu$"),
+                hub_reentry,
+            ],
+            DT_RESULTS_DEL_USER_CONFIRM: [
+                CallbackQueryHandler(dt_delres_yes,        pattern="^dt_delres_yes$"),
+                CallbackQueryHandler(dt_del_res_user_list, pattern="^dt_del_res_user_list$"),
+                hub_reentry,
+            ],
+            DT_RESULTS_DEL_ALL_CONFIRM: [
+                CallbackQueryHandler(dt_del_res_all_yes,   pattern="^dt_del_res_all_yes$"),
+                CallbackQueryHandler(dt_results_mgmt_menu, pattern="^dt_results_mgmt_menu$"),
                 hub_reentry,
             ],
         },

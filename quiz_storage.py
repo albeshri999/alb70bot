@@ -218,6 +218,32 @@ def has_taken_quiz(quiz_id, user_id) -> bool:
     return any(str(r.get("user_id")) == str(user_id) for r in results_for_quiz(quiz_id))
 
 
+def delete_results_for_user(quiz_id, user_id) -> int:
+    """Remove every finished-attempt entry for this one participant on this
+    quiz (score, answers, timing, percentage — the whole result record).
+    Returns how many entries were removed. Since has_taken_quiz() reads from
+    this same list, removing them naturally lets the participant retake the
+    quiz from scratch (subject to the quiz's normal allow_retake rule)."""
+    results  = load_quiz_results()
+    key, uid = str(quiz_id), str(user_id)
+    kept     = [r for r in results if not (str(r.get("quiz_id")) == key and str(r.get("user_id")) == uid)]
+    removed  = len(results) - len(kept)
+    if removed:
+        save_quiz_results(kept)
+    return removed
+
+
+def delete_all_results(quiz_id) -> int:
+    """Remove every finished-attempt entry for ALL participants on this quiz."""
+    results = load_quiz_results()
+    key     = str(quiz_id)
+    kept    = [r for r in results if str(r.get("quiz_id")) != key]
+    removed = len(results) - len(kept)
+    if removed:
+        save_quiz_results(kept)
+    return removed
+
+
 def latest_results_by_user(quiz_id) -> dict:
     """Map user_id -> that user's most recent finished attempt for this quiz.
 
@@ -259,6 +285,27 @@ def set_credited_entry(quiz_id, user_id, score: int, finished_at) -> None:
     quiz_log = log.setdefault(str(quiz_id), {})
     quiz_log[str(user_id)] = {"score": score, "finished_at": finished_at}
     save_credit_log(log)
+
+
+def clear_credited_entry(quiz_id, user_id) -> None:
+    """Forget that this user's score for this quiz was ever credited — used
+    when an admin deletes their result, right after any already-credited
+    points have been removed from their balance (see quiz_admin.py)."""
+    log = load_credit_log()
+    quiz_log = log.get(str(quiz_id))
+    if quiz_log and str(user_id) in quiz_log:
+        del quiz_log[str(user_id)]
+        save_credit_log(log)
+
+
+def clear_all_credited_entries(quiz_id) -> None:
+    """Forget the entire credited-log for this quiz — used when an admin
+    deletes ALL of this quiz's results."""
+    log = load_credit_log()
+    key = str(quiz_id)
+    if key in log:
+        del log[key]
+        save_credit_log(log)
 
 
 # ── Active sessions (in-progress attempts) ───────────────────────────────────

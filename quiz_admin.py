@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
  QA_EDIT_MENU, QA_E_NAME, QA_E_DESC, QA_E_POINTS, QA_E_TIMED, QA_E_MINUTES,
  QA_E_Q_LIST, QA_E_Q_FIELD_MENU, QA_E_Q_FIELD_VAL, QA_E_Q_DEL_CONFIRM,
  QA_RESULTS_VIS,
- ) = range(26)
+ QA_RESULTS_MGMT_MENU, QA_RESULTS_DEL_USER_LIST, QA_RESULTS_DEL_USER_CONFIRM,
+ QA_RESULTS_DEL_ALL_CONFIRM,
+ ) = range(30)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -166,6 +168,7 @@ def _quiz_menu_kb(quiz: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👁 نتائج المتسابقين", callback_data="qa_results_vis_menu")],
         [InlineKeyboardButton(retake, callback_data="qa_toggle_retake")],
         [InlineKeyboardButton("📊 النتائج", callback_data="qa_show_results")],
+        [InlineKeyboardButton("🗑 إدارة النتائج", callback_data="qa_results_mgmt_menu")],
         [InlineKeyboardButton("🗑 حذف", callback_data="qa_delete_confirm")],
         [InlineKeyboardButton("🔙 رجوع لقائمة الاختبارات", callback_data="qa_list_menu")],
         [InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")],
@@ -334,6 +337,156 @@ async def _show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def qa_show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     return await _show_results(update, context)
+
+
+# ── Results management ("🗑 إدارة النتائج") ──────────────────────────────────
+#
+# Two operations, both reachable from the quiz menu:
+#   1. Delete ONE participant's result — wipes their score/answers/timing for
+#      this quiz, and if that attempt's points were already credited to their
+#      balance (via "🏆 حساب نتائج الاختبار"), those points are removed first.
+#   2. Delete ALL results for this quiz — same, for every participant, and
+#      resets the quiz to "nobody has solved it yet" so it can be retaken
+#      from scratch (subject to the quiz's own allow_retake rule).
+#
+# Neither operation touches any OTHER quiz's results, the word-competition
+# balance flows, or the leaderboard directly — only credits.add_credits() /
+# transactions.record() are used, exactly like the existing crediting feature.
+
+def _results_mgmt_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 حذف نتيجة متسابق", callback_data="qa_del_res_user_list")],
+        [InlineKeyboardButton("🗑 حذف جميع النتائج", callback_data="qa_del_res_all")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="qa_back_to_quiz_menu")],
+    ])
+
+
+async def qa_results_mgmt_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("qa_quiz_id")
+    if not qs.get_quiz(quiz_id):
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return QA_HUB
+    await _reply(update, "🗑 *إدارة النتائج*\n\nاختر العملية:", _results_mgmt_kb())
+    return QA_RESULTS_MGMT_MENU
+
+
+# ── Delete a single participant's result ─────────────────────────────────────
+
+async def qa_del_res_user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("qa_quiz_id")
+    latest  = qs.latest_results_by_user(quiz_id)
+    if not latest:
+        await _reply(
+            update, "📭 لا توجد نتائج بعد لهذا الاختبار.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="qa_results_mgmt_menu")]]),
+        )
+        return QA_RESULTS_MGMT_MENU
+    rows = [
+        [InlineKeyboardButton(r.get("user_name", "—"), callback_data=f"qa_delres_sel_{uid}")]
+        for uid, r in latest.items()
+    ]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="qa_results_mgmt_menu")])
+    await _reply(update, "🗑 *حذف نتيجة متسابق*\n\nاختر المتسابق:", InlineKeyboardMarkup(rows))
+    return QA_RESULTS_DEL_USER_LIST
+
+
+async def qa_delres_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    uid = update.callback_query.data.replace("qa_delres_sel_", "")
+    context.user_data["qa_delres_uid"] = uid
+    quiz_id = context.user_data.get("qa_quiz_id")
+    latest  = qs.latest_results_by_user(quiz_id)
+    result  = latest.get(uid, {})
+    name    = result.get("user_name", "—")
+    await _reply(
+        update,
+        f"🗑 هل تريد حذف نتيجة هذا المتسابق؟\n\n*{_md(name)}*",
+        _yn("qa_delres_yes", "qa_del_res_user_list"),
+    )
+    return QA_RESULTS_DEL_USER_CONFIRM
+
+
+async def qa_delres_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("qa_quiz_id")
+    uid     = context.user_data.pop("qa_delres_uid", None)
+    quiz    = qs.get_quiz(quiz_id)
+    if not quiz or not uid:
+        await _reply(update, "⚠️ حدث خطأ. حاول مجدداً.", _hub_kb())
+        return QA_HUB
+
+    # If this participant's points for this quiz were already credited to
+    # their balance, remove exactly those points first.
+    credited = qs.get_credited_entry(quiz_id, uid)
+    if credited:
+        old_score  = int(credited.get("score", 0))
+        user_obj   = get_user(int(uid)) or {}
+        full_name  = user_obj.get("full_name", "—")
+        quiz_name  = quiz.get("name", "—")
+        bal_before = credits.get_balance(int(uid))
+        bal_after  = credits.add_credits(int(uid), -old_score)
+        transactions.record(
+            int(uid), full_name, "quiz_result_delete",
+            old_score, bal_before, bal_after,
+            f"حذف نتيجة اختبار: {quiz_name} (بواسطة المشرف)",
+        )
+        qs.clear_credited_entry(quiz_id, uid)
+
+    qs.delete_results_for_user(quiz_id, uid)
+    await _reply(update, "✅ تم حذف نتيجة المتسابق بنجاح.", _quiz_menu_kb(quiz))
+    return QA_QUIZ_MENU
+
+
+# ── Delete ALL results for this quiz ─────────────────────────────────────────
+
+async def qa_del_res_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(
+        update,
+        "⚠️ سيتم حذف جميع نتائج هذا الاختبار لجميع المتسابقين.\n"
+        "كما سيتم حذف جميع النقاط التي تمت إضافتها لهذا الاختبار من أرصدة المتسابقين.\n\n"
+        "هل تريد المتابعة؟",
+        _yn("qa_del_res_all_yes", "qa_results_mgmt_menu"),
+    )
+    return QA_RESULTS_DEL_ALL_CONFIRM
+
+
+async def qa_del_res_all_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("qa_quiz_id")
+    quiz    = qs.get_quiz(quiz_id)
+    if not quiz:
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return QA_HUB
+    quiz_name = quiz.get("name", "—")
+
+    credit_log = qs.load_credit_log().get(str(quiz_id), {})
+    for uid, entry in credit_log.items():
+        old_score = int(entry.get("score", 0))
+        if not old_score:
+            continue
+        user_obj   = get_user(int(uid)) or {}
+        full_name  = user_obj.get("full_name", "—")
+        bal_before = credits.get_balance(int(uid))
+        bal_after  = credits.add_credits(int(uid), -old_score)
+        transactions.record(
+            int(uid), full_name, "quiz_result_delete_all",
+            old_score, bal_before, bal_after,
+            f"حذف كل نتائج اختبار: {quiz_name} (بواسطة المشرف)",
+        )
+    qs.clear_all_credited_entries(quiz_id)
+    removed = qs.delete_all_results(quiz_id)
+
+    await _reply(
+        update,
+        f"✅ تم حذف جميع نتائج الاختبار ({removed} نتيجة).\n"
+        "تمت إزالة النقاط المضافة سابقاً من أرصدة المتسابقين المتأثرين، "
+        "ويستطيع الجميع إعادة الاختبار الآن كأنه لم يُحل من قبل.",
+        _quiz_menu_kb(quiz),
+    )
+    return QA_QUIZ_MENU
 
 
 # ── Compute results & add points to balances ("🏆 حساب نتائج الاختبار") ──────
@@ -876,6 +1029,7 @@ def build_quiz_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(qa_results_vis_menu, pattern="^qa_results_vis_menu$"),
                 CallbackQueryHandler(qa_toggle_retake,    pattern="^qa_toggle_retake$"),
                 CallbackQueryHandler(qa_show_results,     pattern="^qa_show_results$"),
+                CallbackQueryHandler(qa_results_mgmt_menu, pattern="^qa_results_mgmt_menu$"),
                 CallbackQueryHandler(qa_delete_confirm,   pattern="^qa_delete_confirm$"),
                 CallbackQueryHandler(qa_back_to_quiz_menu, pattern="^qa_back_to_quiz_menu$"),
                 list_entry, hub_reentry,
@@ -960,6 +1114,28 @@ def build_quiz_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(qa_results_vis_on,  pattern="^qa_results_vis_on$"),
                 CallbackQueryHandler(qa_results_vis_off, pattern="^qa_results_vis_off$"),
                 CallbackQueryHandler(qa_back_to_quiz_menu, pattern="^qa_back_to_quiz_menu$"),
+                hub_reentry,
+            ],
+            # ── Results management ("🗑 إدارة النتائج") ──
+            QA_RESULTS_MGMT_MENU: [
+                CallbackQueryHandler(qa_del_res_user_list, pattern="^qa_del_res_user_list$"),
+                CallbackQueryHandler(qa_del_res_all,       pattern="^qa_del_res_all$"),
+                CallbackQueryHandler(qa_back_to_quiz_menu, pattern="^qa_back_to_quiz_menu$"),
+                hub_reentry,
+            ],
+            QA_RESULTS_DEL_USER_LIST: [
+                CallbackQueryHandler(qa_delres_sel,        pattern=r"^qa_delres_sel_\w+$"),
+                CallbackQueryHandler(qa_results_mgmt_menu, pattern="^qa_results_mgmt_menu$"),
+                hub_reentry,
+            ],
+            QA_RESULTS_DEL_USER_CONFIRM: [
+                CallbackQueryHandler(qa_delres_yes,        pattern="^qa_delres_yes$"),
+                CallbackQueryHandler(qa_del_res_user_list, pattern="^qa_del_res_user_list$"),
+                hub_reentry,
+            ],
+            QA_RESULTS_DEL_ALL_CONFIRM: [
+                CallbackQueryHandler(qa_del_res_all_yes,   pattern="^qa_del_res_all_yes$"),
+                CallbackQueryHandler(qa_results_mgmt_menu, pattern="^qa_results_mgmt_menu$"),
                 hub_reentry,
             ],
         },

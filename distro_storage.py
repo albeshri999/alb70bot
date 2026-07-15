@@ -255,6 +255,31 @@ def has_taken_quiz(quiz_id, user_id) -> bool:
     return any(str(r.get("user_id")) == str(user_id) for r in results_for_quiz(quiz_id))
 
 
+def delete_results_for_user(quiz_id, user_id) -> int:
+    """Remove every finished-attempt entry for this one participant on this
+    test (score, answers, timing, percentage — the whole result record).
+    Never touches any balance — this test never adds points. Returns how
+    many entries were removed."""
+    results  = load_results()
+    key, uid = str(quiz_id), str(user_id)
+    kept     = [r for r in results if not (str(r.get("quiz_id")) == key and str(r.get("user_id")) == uid)]
+    removed  = len(results) - len(kept)
+    if removed:
+        save_results(kept)
+    return removed
+
+
+def delete_all_results(quiz_id) -> int:
+    """Remove every finished-attempt entry for ALL participants on this test."""
+    results = load_results()
+    key     = str(quiz_id)
+    kept    = [r for r in results if str(r.get("quiz_id")) != key]
+    removed = len(results) - len(kept)
+    if removed:
+        save_results(kept)
+    return removed
+
+
 # ── Active sessions (in-progress attempts) ───────────────────────────────────
 
 def load_sessions() -> dict:
@@ -368,6 +393,17 @@ def set_team_split(quiz_id, team_size: int, teams: list) -> None:
         "generated_at": datetime.utcnow().isoformat(),
     }
     save_teams(data)
+
+
+def clear_team_split(quiz_id) -> None:
+    """Drop any saved team split for this test — used whenever its results
+    change (a result is deleted), so a stale split can never be exported or
+    mistaken for one that reflects the current results."""
+    data = load_teams()
+    key = str(quiz_id)
+    if key in data:
+        del data[key]
+        save_teams(data)
 
 
 def compute_teams(quiz_id, team_size: int):
