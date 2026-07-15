@@ -354,7 +354,7 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
     n_q           = len(quiz.get("questions", []))
     correct_count = session.get("correct_count", 0)
     wrong_count   = n_q - correct_count
-    points_each   = int(quiz.get("points_per_question", 0))
+    points_each   = ds.get_points_per_question(quiz)
     score         = correct_count * points_each
     total_points  = n_q * points_each
     percentage    = round((correct_count / n_q) * 100, 1) if n_q else 0.0

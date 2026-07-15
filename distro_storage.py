@@ -221,6 +221,14 @@ def is_results_visible(quiz: dict) -> bool:
     return bool(quiz.get("show_score", True))
 
 
+def get_points_per_question(quiz: dict) -> int:
+    """Points awarded per correct answer. Defaults to 1 if missing/zero —
+    this covers distribution tests created before this field existed, whose
+    stored records simply don't have a 'points_per_question' key at all
+    (that used to make every score come out as 0/0)."""
+    return int(quiz.get("points_per_question") or 1)
+
+
 def visible_quizzes() -> dict:
     return {k: v for k, v in load_quizzes().items() if v.get("visible")}
 

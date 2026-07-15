@@ -185,7 +185,8 @@ def _quiz_menu_kb(quiz: dict) -> InlineKeyboardMarkup:
 
 def _quiz_summary(quiz: dict) -> str:
     n_q   = len(quiz.get("questions", []))
-    total = n_q * int(quiz.get("points_per_question", 0))
+    points_each = ds.get_points_per_question(quiz)
+    total = n_q * points_each
     time_line = f"{quiz.get('time_minutes')} دقيقة" if quiz.get("timed") else "بدون تحديد"
     n_results = len(ds.results_for_quiz(quiz.get("id")))
     lines = [f"👥 *{_md(quiz.get('name', '—'))}*"]
@@ -194,7 +195,7 @@ def _quiz_summary(quiz: dict) -> str:
     lines += [
         "",
         f"❓ عدد الأسئلة: *{n_q}*",
-        f"🔢 درجة كل سؤال: *{quiz.get('points_per_question', 0)}*  (الإجمالي: *{total}*)",
+        f"🔢 درجة كل سؤال: *{points_each}*  (الإجمالي: *{total}*)",
         f"⏱ الوقت: *{time_line}*",
         f"👁 ظاهر للمتسابقين: *{'نعم' if quiz.get('visible') else 'لا'}*",
         f"🚪 الدخول: *{'مسموح' if ds.is_entry_open(quiz) else 'ممنوع'}*",
