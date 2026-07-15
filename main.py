@@ -27,7 +27,6 @@ from distro_user import (
 from initiatives_admin import build_initiatives_admin_handler
 from initiatives_user import (
     handle_menu_initiatives, handle_initiative_request, handle_initiative_noop,
-    handle_menu_my_initiatives,
 )
 from achievements_user import handle_menu_achievements
 
@@ -100,7 +99,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_initiatives,   pattern="^menu_initiatives$"))
     app.add_handler(CallbackQueryHandler(handle_initiative_request, pattern=r"^in_req_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_initiative_noop,    pattern="^in_noop$"))
-    app.add_handler(CallbackQueryHandler(handle_menu_my_initiatives, pattern="^menu_my_initiatives$"))
 
     # Achievements — participant-facing (🏅 إنجازاتي), fully independent
     app.add_handler(CallbackQueryHandler(handle_menu_achievements, pattern="^menu_achievements$"))

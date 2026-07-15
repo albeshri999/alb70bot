@@ -57,7 +57,6 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton("💡 فرص المبادرات", callback_data="menu_initiatives")])
     except Exception:
         pass
-    rows.append([InlineKeyboardButton("📌 مبادراتي", callback_data="menu_my_initiatives")])
     rows.append([InlineKeyboardButton("🏅 إنجازاتي", callback_data="menu_achievements")])
     return InlineKeyboardMarkup(rows)
 
