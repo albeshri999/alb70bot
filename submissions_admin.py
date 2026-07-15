@@ -30,6 +30,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes, ConversationHandler,
     MessageHandler, CallbackQueryHandler, filters,
+    ApplicationHandlerStop,
 )
 from telegram.constants import ParseMode
 
@@ -44,13 +45,14 @@ logger = logging.getLogger(__name__)
 # ── States ────────────────────────────────────────────────────────────────────
 (SB_HUB, SB_LIST, SB_DETAIL, SB_DEL_CONFIRM,
  SB_C_NAME, SB_C_DESC, SB_C_TYPE, SB_C_POINTS, SB_C_WINNERS, SB_C_MAXSCORE,
- SB_C_DEADLINE, SB_C_EDITABLE, SB_C_VISIBLE,
+ SB_C_DEADLINE, SB_C_EDITABLE, SB_C_HIDENAMES, SB_C_VISIBLE,
  SB_EDIT_MENU, SB_E_NAME, SB_E_DESC, SB_E_POINTS, SB_E_WINNERS, SB_E_MAXSCORE,
  SB_E_DEADLINE,
  SB_VIS_MENU,
  SB_ENTRIES_LIST, SB_ENTRY_DETAIL, SB_ENTRY_SCORE,
  SB_FINALIZE_LIST, SB_FINALIZE_CONFIRM,
- ) = range(26)
+ SB_CHANNEL_SETUP,
+ ) = range(28)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,11 +97,13 @@ def _fmt_date(iso_str) -> str:
 # ── Hub ───────────────────────────────────────────────────────────────────────
 
 def _hub_kb() -> InlineKeyboardMarkup:
+    channel_line = "📺 قناة المشاركات ✅" if subs.is_channel_configured() else "📺 قناة المشاركات ⚠️ (غير مُعدة)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إنشاء مشاركة", callback_data="sb_create")],
         [InlineKeyboardButton("📋 قائمة المشاركات", callback_data="sb_list")],
         [InlineKeyboardButton("📥 المشاركات المرسلة", callback_data="sb_entries")],
         [InlineKeyboardButton("🏆 اعتماد النتائج", callback_data="sb_finalize")],
+        [InlineKeyboardButton(channel_line, callback_data="sb_channel")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")],
     ])
 
@@ -113,6 +117,70 @@ async def sb_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
     context.user_data.pop("sb_submission_id", None)
     await _reply(update, "🎭 *إدارة المشاركات*\n\nاختر العملية:", _hub_kb())
+    return SB_HUB
+
+
+# ── Channel setup ("📺 قناة المشاركات") ────────────────────────────────────
+
+async def sb_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    channel_id = subs.get_channel_id()
+    if channel_id:
+        title = subs.get_channel_title() or "—"
+        text = (
+            f"📺 *قناة المشاركات*\n\n"
+            f"القناة المرتبطة حالياً: *{title}*\n"
+            f"المعرف: `{channel_id}`\n\n"
+            "لتغيير القناة، أضف البوت كمشرف في القناة الجديدة ثم أعد توجيه "
+            "(Forward) أي رسالة منها إلى هذا الخاص."
+        )
+    else:
+        text = (
+            "📺 *قناة المشاركات*\n\n"
+            "لم يتم ربط أي قناة بعد.\n\n"
+            "الخطوات:\n"
+            "1️⃣ أنشئ قناة خاصة (Private Channel).\n"
+            "2️⃣ أضف هذا البوت كمشرف (Admin) فيها.\n"
+            "3️⃣ أعد توجيه (Forward) أي رسالة من داخل القناة إلى هذا الخاص الآن."
+        )
+    await _reply(update, text, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_hub")]]))
+    return SB_CHANNEL_SETUP
+
+
+async def sb_channel_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    forwarded_chat = getattr(message, "forward_from_chat", None)
+    if not forwarded_chat or getattr(forwarded_chat, "type", None) != "channel":
+        await message.reply_text(
+            "⚠️ الرجاء إعادة توجيه (Forward) رسالة مباشرة من داخل القناة، وليس نصاً عادياً."
+        )
+        return SB_CHANNEL_SETUP
+
+    channel_id = forwarded_chat.id
+    title = getattr(forwarded_chat, "title", None) or "—"
+
+    try:
+        member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        is_admin_there = getattr(member, "status", None) in ("administrator", "creator")
+    except Exception as e:
+        logger.warning("could not verify bot admin status in channel: %s", e)
+        is_admin_there = None  # unknown — proceed but warn
+
+    subs.set_channel_id(channel_id)
+    subs.set_channel_title(title)
+
+    if is_admin_there is False:
+        warning = "\n\n⚠️ يبدو أن البوت ليس مشرفاً في هذه القناة بعد — يرجى إضافته كمشرف حتى تعمل المشاركات بشكل صحيح."
+    elif is_admin_there is None:
+        warning = "\n\n⚠️ تعذر التحقق من صلاحيات البوت في القناة — تأكد أنه مضاف كمشرف."
+    else:
+        warning = ""
+
+    await message.reply_text(
+        f"✅ تم ربط قناة المشاركات: *{title}*{warning}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_hub_kb(),
+    )
     return SB_HUB
 
 
@@ -156,6 +224,7 @@ def _submission_detail_text(submission: dict) -> str:
     entries = subs.entries_for_submission(submission.get("id"))
     visibility = "✅ ظاهرة" if submission.get("visible") else "🙈 مخفية"
     editable = "✅ يسمح بالتعديل" if submission.get("allow_edit") else "❌ لا يسمح بالتعديل"
+    names_line = "❌ مخفية (تحكيم مجهول)" if submission.get("hide_names") else "✅ ظاهرة للمحكمين"
     finalized = "✔️ تم اعتماد النتائج" if submission.get("results_finalized") else "⏳ لم تُعتمد بعد"
     type_label = subs.MEDIA_TYPES.get(submission.get("media_type"), "—")
     return (
@@ -167,6 +236,7 @@ def _submission_detail_text(submission: dict) -> str:
         f"💯 الدرجة العظمى: *{submission.get('max_score', 0)}*\n"
         f"⏰ آخر موعد: {_fmt_date(submission.get('deadline'))}\n"
         f"✏️ {editable}\n"
+        f"🎭 أسماء المتسابقين: {names_line}\n"
         f"👁 حالة الظهور: *{visibility}*\n"
         f"📥 عدد المشاركات المرسلة: *{len(entries)}*\n"
         f"🏁 حالة النتائج: {finalized}\n"
@@ -322,13 +392,31 @@ async def sb_c_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def sb_editable_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data["sb_new"]["allow_edit"] = True
-    await _reply(update, "👁 هل المشاركة ظاهرة للمتسابقين؟", _yn("sb_vis_yes", "sb_vis_no"))
-    return SB_C_VISIBLE
+    await _reply(update, "🎭 هل تظهر أسماء المتسابقين للمحكمين؟",
+                 _yn("sb_shownames_yes", "sb_shownames_no"))
+    return SB_C_HIDENAMES
 
 
 async def sb_editable_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data["sb_new"]["allow_edit"] = False
+    await _reply(update, "🎭 هل تظهر أسماء المتسابقين للمحكمين؟",
+                 _yn("sb_shownames_yes", "sb_shownames_no"))
+    return SB_C_HIDENAMES
+
+
+async def sb_shownames_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'✅ نعم' → names are shown → hide_names = False."""
+    await update.callback_query.answer()
+    context.user_data["sb_new"]["hide_names"] = False
+    await _reply(update, "👁 هل المشاركة ظاهرة للمتسابقين؟", _yn("sb_vis_yes", "sb_vis_no"))
+    return SB_C_VISIBLE
+
+
+async def sb_shownames_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'❌ لا' → names are hidden (anonymous judging id used instead) → hide_names = True."""
+    await update.callback_query.answer()
+    context.user_data["sb_new"]["hide_names"] = True
     await _reply(update, "👁 هل المشاركة ظاهرة للمتسابقين؟", _yn("sb_vis_yes", "sb_vis_no"))
     return SB_C_VISIBLE
 
@@ -344,6 +432,7 @@ async def _finish_create(update: Update, context: ContextTypes.DEFAULT_TYPE, vis
         max_score=data.get("max_score", 100),
         deadline_iso=data.get("deadline"),
         allow_edit=data.get("allow_edit", False),
+        hide_names=data.get("hide_names", False),
         visible=visible,
     )
     context.user_data.pop("sb_new", None)
@@ -371,6 +460,7 @@ def _edit_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔢 تعديل عدد الفائزين", callback_data="sb_e_winners")],
         [InlineKeyboardButton("💯 تعديل الدرجة العظمى", callback_data="sb_e_maxscore")],
         [InlineKeyboardButton("⏰ تعديل آخر موعد", callback_data="sb_e_deadline")],
+        [InlineKeyboardButton("🎭 تبديل إظهار أسماء المتسابقين", callback_data="sb_e_togglenames")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="sb_back_to_detail")],
     ])
 
@@ -476,6 +566,19 @@ async def sb_e_deadline_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SB_EDIT_MENU
 
 
+async def sb_e_togglenames(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    submission_id = context.user_data.get("sb_submission_id")
+    submission = subs.get_submission(submission_id)
+    if not submission:
+        return await _show_list(update, context)
+    new_value = not submission.get("hide_names")
+    subs.update_submission_field(submission_id, hide_names=new_value)
+    label = "❌ مخفية (تحكيم مجهول)" if new_value else "✅ ظاهرة للمحكمين"
+    await _reply(update, f"✅ تم التحديث.\n\nأسماء المتسابقين الآن: {label}", _edit_menu_kb())
+    return SB_EDIT_MENU
+
+
 # ── Show/hide submission (confirm-first) ──────────────────────────────────────
 
 def _vis_menu_kb() -> InlineKeyboardMarkup:
@@ -555,8 +658,10 @@ def _entries_list_kb(entries: list) -> InlineKeyboardMarkup:
     submissions = subs.load_submissions()
     rows = []
     for e in entries:
-        sub_name = submissions.get(str(e.get("submission_id")), {}).get("name", "—")
-        label = f"{sub_name} — {e.get('user_name', '—')} — {_fmt_date(e.get('submitted_at'))}"
+        submission = submissions.get(str(e.get("submission_id")), {})
+        sub_name = submission.get("name", "—")
+        identity = subs.display_identity(e, submission)
+        label = f"{sub_name} — {identity} — {_fmt_date(e.get('submitted_at'))}"
         rows.append([InlineKeyboardButton(
             label[:64], callback_data=f"sb_entry_{e['submission_id']}_{e['user_id']}"
         )])
@@ -599,44 +704,23 @@ async def sb_entry_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not entry or not submission:
         return await _show_entries_list(update, context)
 
+    identity = subs.display_identity(entry, submission)
+    link = subs.channel_message_link(entry.get("channel_id"), entry.get("message_id"))
     text = (
         f"🎭 المشاركة: *{submission.get('name')}*\n"
-        f"👤 المتسابق: *{entry.get('user_name', '—')}*\n"
+        f"👤 {identity}\n"
         f"📅 وقت الإرسال: {_fmt_date(entry.get('submitted_at'))}\n"
         f"📎 نوع المرفق: *{subs.MEDIA_TYPES.get(entry.get('file_type'), '—')}*\n"
+        f"📺 المرفق محفوظ في قناة المشاركات: {link}\n"
         f"الحالة: {_entry_status_label(entry)}\n"
         f"💯 الدرجة الحالية: *{entry.get('score') if entry.get('score') is not None else '—'}* "
         f"من *{submission.get('max_score', 0)}*"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📎 عرض المرفق", callback_data="sb_entry_view_file")],
         [InlineKeyboardButton("📝 إعطاء درجة", callback_data="sb_entry_score")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="sb_entries_back")],
     ])
     await _reply(update, text, kb)
-    return SB_ENTRY_DETAIL
-
-
-async def sb_entry_view_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    submission_id = context.user_data.get("sb_entry_submission_id")
-    user_id       = context.user_data.get("sb_entry_user_id")
-    entry = subs.get_entry(submission_id, user_id)
-    if not entry:
-        return SB_ENTRY_DETAIL
-    file_id   = entry.get("file_id")
-    file_type = entry.get("file_type")
-    try:
-        if file_type == "audio":
-            await query.message.reply_voice(file_id)
-        elif file_type == "video":
-            await query.message.reply_video(file_id)
-        elif file_type == "photo":
-            await query.message.reply_photo(file_id)
-    except Exception as e:
-        logger.warning("sb_entry_view_file failed: %s", e)
-        await query.message.reply_text("⚠️ تعذر عرض المرفق.")
     return SB_ENTRY_DETAIL
 
 
@@ -670,7 +754,6 @@ async def sb_entry_score_val(update: Update, context: ContextTypes.DEFAULT_TYPE)
     subs.set_entry_score(submission_id, user_id, score)
     entry = subs.get_entry(submission_id, user_id)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📎 عرض المرفق", callback_data="sb_entry_view_file")],
         [InlineKeyboardButton("📝 إعطاء درجة", callback_data="sb_entry_score")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="sb_entries_back")],
     ])
@@ -803,6 +886,133 @@ async def sb_fin_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return SB_HUB
 
 
+# ── Channel moderation buttons (⭐/🏆/❌/🗑 on each channel post) ────────────
+#
+# These are registered as plain global CallbackQueryHandlers in main.py (NOT
+# part of this file's ConversationHandler) because they're attached to
+# messages posted in the submissions channel, which isn't part of any
+# per-chat conversation state. Each one re-checks admin permission itself
+# since the channel buttons are visible to anyone who can see the post.
+
+CHSB_PENDING_SCORE_KEY = "chsb_pending_score"  # (submission_id, user_id) tuple
+
+
+def _parse_chsb_payload(data: str, prefix: str):
+    payload = data.replace(prefix, "")
+    submission_id, user_id = payload.split("_", 1)
+    return submission_id, user_id
+
+
+async def chsb_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_score_")
+    submission = subs.get_submission(submission_id)
+    if not submission:
+        await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
+        return
+    context.user_data[CHSB_PENDING_SCORE_KEY] = (submission_id, user_id)
+    await query.answer()
+    try:
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f"📝 أرسل الآن درجة هذه المشاركة (من {submission.get('max_score', 100)}):",
+        )
+    except Exception as e:
+        logger.warning("chsb_score DM prompt failed: %s", e)
+        await query.answer("⚠️ افتح محادثة خاصة مع البوت أولاً (اضغط /start) ثم حاول مجدداً.", show_alert=True)
+
+
+async def chsb_score_dm_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registered in an earlier handler GROUP than the word-competition's
+    general text handler (see main.py) — a strict no-op (returns normally,
+    letting that group run as usual) unless this exact admin just tapped
+    '⭐ تقييم' on a channel post and is now expected to type the score in
+    this private chat. Whenever it DOES consume the message, it raises
+    ApplicationHandlerStop so the word-competition handler never also
+    tries to interpret the score number as a word-guess answer."""
+    pending = context.user_data.get(CHSB_PENDING_SCORE_KEY)
+    if not pending:
+        return
+    submission_id, user_id = pending
+    submission = subs.get_submission(submission_id)
+    if not submission:
+        context.user_data.pop(CHSB_PENDING_SCORE_KEY, None)
+        return
+    max_score = submission.get("max_score", 100)
+
+    text = update.message.text.strip()
+    try:
+        score = float(text)
+    except ValueError:
+        await update.message.reply_text(f"⚠️ الرجاء إدخال رقم صحيح بين 0 و {max_score}.")
+        raise ApplicationHandlerStop
+    if score < 0 or score > max_score:
+        await update.message.reply_text(f"⚠️ الدرجة يجب أن تكون بين 0 و {max_score}.")
+        raise ApplicationHandlerStop
+    if score == int(score):
+        score = int(score)
+
+    subs.set_entry_score(submission_id, user_id, score)
+    context.user_data.pop(CHSB_PENDING_SCORE_KEY, None)
+    await update.message.reply_text(f"✅ تم تسجيل الدرجة: *{score}* من *{max_score}*", parse_mode=ParseMode.MARKDOWN)
+    raise ApplicationHandlerStop
+
+
+async def chsb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_approve_")
+    subs.set_entry_status(submission_id, user_id, subs.ENTRY_STATUS_ACCEPTED)
+    await query.answer("🏆 تم اعتماد المشاركة كصالحة للتحكيم.", show_alert=True)
+    try:
+        if query.message.caption:
+            await context.bot.edit_message_caption(
+                chat_id=query.message.chat_id, message_id=query.message.message_id,
+                caption=query.message.caption + "\n\n🏆 الحالة: معتمدة",
+                reply_markup=query.message.reply_markup,
+            )
+    except Exception as e:
+        logger.warning("chsb_approve caption edit failed: %s", e)
+
+
+async def chsb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_reject_")
+    subs.set_entry_status(submission_id, user_id, subs.ENTRY_STATUS_REJECTED)
+    await query.answer("❌ تم رفض المشاركة.", show_alert=True)
+    try:
+        if query.message.caption:
+            await context.bot.edit_message_caption(
+                chat_id=query.message.chat_id, message_id=query.message.message_id,
+                caption=query.message.caption + "\n\n❌ الحالة: مرفوضة",
+                reply_markup=query.message.reply_markup,
+            )
+    except Exception as e:
+        logger.warning("chsb_reject caption edit failed: %s", e)
+
+
+async def chsb_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_delete_")
+    subs.delete_entry(submission_id, user_id)
+    await query.answer("🗑 تم حذف المشاركة من القاعدة.", show_alert=True)
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.warning("chsb_delete channel message delete failed: %s", e)
+
+
 # ── Cancel fallback ───────────────────────────────────────────────────────────
 
 async def sb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -824,6 +1034,11 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_list,     pattern="^sb_list$"),
                 CallbackQueryHandler(sb_entries,  pattern="^sb_entries$"),
                 CallbackQueryHandler(sb_finalize, pattern="^sb_finalize$"),
+                CallbackQueryHandler(sb_channel,  pattern="^sb_channel$"),
+            ],
+            SB_CHANNEL_SETUP: [
+                MessageHandler(filters.ALL & ~filters.COMMAND, sb_channel_capture),
+                hub_reentry,
             ],
             SB_LIST: [
                 CallbackQueryHandler(sb_pick, pattern=r"^sb_pick_\w+$"),
@@ -856,6 +1071,11 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_editable_no,  pattern="^sb_editable_no$"),
                 hub_reentry,
             ],
+            SB_C_HIDENAMES: [
+                CallbackQueryHandler(sb_shownames_yes, pattern="^sb_shownames_yes$"),
+                CallbackQueryHandler(sb_shownames_no,  pattern="^sb_shownames_no$"),
+                hub_reentry,
+            ],
             SB_C_VISIBLE: [
                 CallbackQueryHandler(sb_vis_yes, pattern="^sb_vis_yes$"),
                 CallbackQueryHandler(sb_vis_no,  pattern="^sb_vis_no$"),
@@ -868,6 +1088,7 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_e_winners,      pattern="^sb_e_winners$"),
                 CallbackQueryHandler(sb_e_maxscore,     pattern="^sb_e_maxscore$"),
                 CallbackQueryHandler(sb_e_deadline,     pattern="^sb_e_deadline$"),
+                CallbackQueryHandler(sb_e_togglenames,  pattern="^sb_e_togglenames$"),
                 CallbackQueryHandler(sb_back_to_detail, pattern="^sb_back_to_detail$"),
                 hub_reentry,
             ],
@@ -888,7 +1109,6 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 hub_reentry,
             ],
             SB_ENTRY_DETAIL: [
-                CallbackQueryHandler(sb_entry_view_file, pattern="^sb_entry_view_file$"),
                 CallbackQueryHandler(sb_entry_score,     pattern="^sb_entry_score$"),
                 CallbackQueryHandler(sb_entries_back,    pattern="^sb_entries_back$"),
                 hub_reentry,

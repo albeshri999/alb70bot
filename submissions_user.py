@@ -145,7 +145,9 @@ async def handle_submission_start(update: Update, context: ContextTypes.DEFAULT_
 async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Global media handler — a strict no-op unless this exact user is
     currently expected to upload for a specific submission (never touches
-    any other message flow in the bot)."""
+    any other message flow in the bot). Forwards the file straight into the
+    '📺 قناة المشاركات' channel and stores only that channel message's
+    reference — the bot itself never keeps the file."""
     submission_id = context.user_data.get(PENDING_KEY)
     if not submission_id:
         return
@@ -175,19 +177,83 @@ async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop(PENDING_KEY, None)
         await message.reply_text("⚠️ انتهى موعد استقبال هذه المشاركة.")
         return
-    entry = subs.get_entry(submission_id, user_id)
-    if entry and not submission.get("allow_edit"):
+    old_entry = subs.get_entry(submission_id, user_id)
+    if old_entry and not submission.get("allow_edit"):
         context.user_data.pop(PENDING_KEY, None)
         await message.reply_text("⚠️ لقد أرسلت مشاركتك مسبقاً ولا يمكن تعديلها.")
+        return
+
+    channel_id = subs.get_channel_id()
+    if not channel_id:
+        context.user_data.pop(PENDING_KEY, None)
+        await message.reply_text(
+            "⚠️ لم يتم إعداد قناة استقبال المشاركات بعد. يرجى إبلاغ المشرف والمحاولة لاحقاً."
+        )
         return
 
     from storage import get_user
     user = get_user(user_id) or {}
     full_name = user.get("full_name") or (update.effective_user.full_name if update.effective_user else "—")
 
-    subs.create_or_replace_entry(submission_id, user_id, full_name, file_id, media_type)
+    # Same anonymous judging id is kept across a replacement.
+    judge_id = old_entry.get("judge_id") if old_entry else subs.next_judge_id(submission_id)
+    hide_names = submission.get("hide_names")
+    identity_line = (
+        f"🎖 المتسابق رقم: {judge_id}" if hide_names
+        else f"👤 اسم المتسابق: {full_name}\n🆔 معرف المتسابق: {user_id}"
+    )
+    caption = (
+        f"🏆 {submission.get('name')}\n\n"
+        f"{identity_line}\n"
+        f"📅 {message.date.strftime('%Y-%m-%d %H:%M') if message.date else '—'}\n"
+        f"🏷 نوع المشاركة: {subs.MEDIA_TYPES.get(media_type, '—')}"
+    )
+    channel_kb = _channel_moderation_kb(submission_id, user_id)
+
+    try:
+        if media_type == "audio":
+            sent = await context.bot.send_voice(chat_id=channel_id, voice=file_id,
+                                                 caption=caption, reply_markup=channel_kb)
+        elif media_type == "video":
+            sent = await context.bot.send_video(chat_id=channel_id, video=file_id,
+                                                 caption=caption, reply_markup=channel_kb)
+        else:
+            sent = await context.bot.send_photo(chat_id=channel_id, photo=file_id,
+                                                 caption=caption, reply_markup=channel_kb)
+    except Exception as e:
+        logger.error("failed to forward submission to channel: %s", e)
+        context.user_data.pop(PENDING_KEY, None)
+        await message.reply_text("⚠️ تعذر إرسال مشاركتك حالياً. يرجى إبلاغ المشرف والمحاولة لاحقاً.")
+        return
+
+    # Replacing a previous entry — remove its old channel message so the
+    # channel only ever shows the participant's latest submission.
+    if old_entry and old_entry.get("channel_id") and old_entry.get("message_id"):
+        try:
+            await context.bot.delete_message(chat_id=old_entry["channel_id"], message_id=old_entry["message_id"])
+        except Exception as e:
+            logger.warning("failed to delete replaced channel message: %s", e)
+
+    subs.create_or_replace_entry(
+        submission_id, user_id, full_name, submission.get("name", "—"),
+        channel_id, sent.message_id, media_type,
+    )
+    # Preserve the assigned judge_id explicitly (create_or_replace_entry
+    # already reuses old_entry's judge_id automatically when present, but
+    # for a brand-new entry it assigns its own — nothing further needed).
     context.user_data.pop(PENDING_KEY, None)
     await message.reply_text("✅ تم استلام مشاركتك بنجاح. بالتوفيق!")
+
+
+def _channel_moderation_kb(submission_id, user_id) -> InlineKeyboardMarkup:
+    """Admin-only moderation buttons attached to every entry posted in the
+    submissions channel — see submissions_admin.py for the handlers."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ تقييم", callback_data=f"chsb_score_{submission_id}_{user_id}"),
+         InlineKeyboardButton("🏆 اعتماد", callback_data=f"chsb_approve_{submission_id}_{user_id}")],
+        [InlineKeyboardButton("❌ رفض", callback_data=f"chsb_reject_{submission_id}_{user_id}"),
+         InlineKeyboardButton("🗑 حذف", callback_data=f"chsb_delete_{submission_id}_{user_id}")],
+    ])
 
 
 async def handle_menu_my_submissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

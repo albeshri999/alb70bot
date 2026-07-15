@@ -30,7 +30,10 @@ from initiatives_user import (
     handle_menu_my_initiatives,
 )
 from achievements_user import handle_menu_achievements
-from submissions_admin import build_submissions_admin_handler
+from submissions_admin import (
+    build_submissions_admin_handler,
+    chsb_score, chsb_score_dm_value, chsb_approve, chsb_reject, chsb_delete,
+)
 from submissions_user import (
     handle_menu_submissions, handle_submission_view, handle_submission_start,
     handle_submission_media,
@@ -55,6 +58,14 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_notif_user,    pattern=r"^notif_user_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_notif_tlog,    pattern=r"^notif_tlog_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_notif_results, pattern=r"^notif_results_\d+$"))
+
+    # Submissions channel moderation buttons (⭐/🏆/❌/🗑 on each channel post)
+    # — registered early since they're attached to channel messages, entirely
+    # outside any ConversationHandler's per-chat state.
+    app.add_handler(CallbackQueryHandler(chsb_score,   pattern=r"^chsb_score_\w+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_approve, pattern=r"^chsb_approve_\w+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_reject,  pattern=r"^chsb_reject_\w+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_delete,  pattern=r"^chsb_delete_\w+_\d+$"))
 
     # Admin ConversationHandler
     app.add_handler(build_admin_handler())
@@ -139,6 +150,16 @@ def main() -> None:
         filters.VOICE | filters.AUDIO | filters.VIDEO | filters.PHOTO,
         handle_submission_media,
     ))
+
+    # Submissions — admin's DM reply after tapping '⭐ تقييم' on a channel
+    # post. Registered in an EARLIER group (-1) than the word-competition's
+    # text handler below (group 0 / default) — python-telegram-bot runs one
+    # handler per group per update, so both get a chance at the same text
+    # message. This handler is a strict no-op unless that exact admin has a
+    # pending score request, in which case it raises ApplicationHandlerStop
+    # so the word-competition handler never also treats the score number as
+    # a word-guess answer.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chsb_score_dm_value), group=-1)
 
     # General text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

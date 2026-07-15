@@ -8,12 +8,21 @@ the existing credits.py/transactions.py helpers (called from
 submissions_admin.py), exactly like every other crediting flow in the bot.
 
 All data lives in its own JSON files under data/:
-  - data/submissions.json        → contest definitions ("أفضل تلاوة قرآن"...)
-  - data/submission_entries.json → every participant's uploaded entry
+  - data/submissions.json          → contest definitions ("أفضل تلاوة قرآن"...)
+  - data/submission_entries.json   → every participant's entry — a
+                                      REFERENCE ONLY (channel_id + message_id),
+                                      never the file itself
+  - data/submissions_settings.json → the linked '📺 قناة المشاركات' channel id
+
+Submitted media is never stored inside the bot — every entry is forwarded to
+a dedicated private Telegram channel (the bot must be an admin there), and
+only that channel message's reference is kept in the database. This keeps
+the bot's own storage footprint tiny regardless of how many audio/video/photo
+submissions come in, relying on Telegram's own file hosting.
 
 Designed to be easy to extend with new media types later: MEDIA_TYPES is a
-single dict to extend, and entries just store a generic file_id/file_type
-pair — no per-type branching anywhere in the storage layer itself.
+single dict to extend, and entries just store a generic channel reference —
+no per-type branching anywhere in the storage layer itself.
 """
 import json
 import os
@@ -21,6 +30,7 @@ from datetime import datetime
 
 SUBMISSIONS_FILE = "data/submissions.json"
 ENTRIES_FILE      = "data/submission_entries.json"
+SETTINGS_FILE     = "data/submissions_settings.json"
 
 # ── Media types (extend this dict to support new submission formats) ───────
 MEDIA_TYPES = {
@@ -29,8 +39,10 @@ MEDIA_TYPES = {
     "photo": "📷 صورة",
 }
 
-ENTRY_STATUS_SUBMITTED = "submitted"
-ENTRY_STATUS_WINNER    = "winner"
+ENTRY_STATUS_SUBMITTED  = "submitted"
+ENTRY_STATUS_ACCEPTED   = "accepted"    # ⭐ reviewed/valid, awaiting scoring
+ENTRY_STATUS_REJECTED   = "rejected"    # ❌ disqualified — never wins, never thanked
+ENTRY_STATUS_WINNER     = "winner"
 ENTRY_STATUS_PARTICIPANT = "participant"
 
 
@@ -46,6 +58,50 @@ def _save_json(filepath: str, data) -> None:
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ── Settings (📺 قناة المشاركات) ─────────────────────────────────────────────
+
+def load_settings() -> dict:
+    return _load_json(SETTINGS_FILE, {})
+
+
+def get_channel_id():
+    """The linked private channel's chat id (int-like string), or None if
+    not configured yet."""
+    return load_settings().get("channel_id")
+
+
+def set_channel_id(channel_id) -> None:
+    settings = load_settings()
+    settings["channel_id"] = channel_id
+    _save_json(SETTINGS_FILE, settings)
+
+
+def get_channel_title():
+    return load_settings().get("channel_title")
+
+
+def set_channel_title(title: str) -> None:
+    settings = load_settings()
+    settings["channel_title"] = title
+    _save_json(SETTINGS_FILE, settings)
+
+
+def is_channel_configured() -> bool:
+    return get_channel_id() is not None
+
+
+def channel_message_link(channel_id, message_id) -> str:
+    """Deep link to a specific message inside a private channel
+    (https://t.me/c/<internal_id>/<message_id>) — works for anyone who is
+    already a member of that channel, exactly like tapping the message."""
+    cid = str(channel_id)
+    if cid.startswith("-100"):
+        cid = cid[4:]
+    elif cid.startswith("-"):
+        cid = cid[1:]
+    return f"https://t.me/c/{cid}/{message_id}"
 
 
 # ── Submissions (contest definitions) ───────────────────────────────────────
@@ -76,7 +132,7 @@ def next_submission_id() -> str:
 
 def create_submission(name: str, description: str, media_type: str, points: int,
                        num_winners: int, max_score: int, deadline_iso: str,
-                       allow_edit: bool, visible: bool) -> str:
+                       allow_edit: bool, hide_names: bool, visible: bool) -> str:
     submission_id = next_submission_id()
     save_submission(submission_id, {
         "id": submission_id,
@@ -88,6 +144,9 @@ def create_submission(name: str, description: str, media_type: str, points: int,
         "max_score": int(max_score),
         "deadline": deadline_iso,
         "allow_edit": bool(allow_edit),
+        # Judging anonymity — see display_identity() below. Judges only ever
+        # see a stable 'P-001'-style id until results are finalized.
+        "hide_names": bool(hide_names),
         "visible": bool(visible),
         "results_finalized": False,
         "created_at": datetime.utcnow().isoformat(),
@@ -189,19 +248,48 @@ def has_entry(submission_id, user_id) -> bool:
     return get_entry(submission_id, user_id) is not None
 
 
-def create_or_replace_entry(submission_id, user_id, user_name: str,
-                             file_id: str, file_type: str) -> dict:
-    """Adds a new entry, replacing (deleting) any previous one by the same
-    user for the same submission — 'يحذف المشاركة السابقة ويحتفظ بآخر واحدة فقط'."""
+def next_judge_id(submission_id) -> str:
+    """Next sequential anonymous judging id ('P-001', 'P-002', ...) for this
+    submission — stable per participant (see create_or_replace_entry, which
+    reuses an existing judge_id across replacements instead of reassigning)."""
+    existing = [e for e in entries_for_submission(submission_id) if e.get("judge_id")]
+    return f"P-{len(existing) + 1:03d}"
+
+
+def display_identity(entry: dict, submission: dict) -> str:
+    """What a judge/admin should see for this entry: the real name, unless
+    the contest hides names AND results aren't finalized yet — in which
+    case only the anonymous judging id is shown. After finalize_submission()
+    runs, the real identity is revealed (per the requirement)."""
+    if submission.get("hide_names") and not submission.get("results_finalized"):
+        return f"🎖 المتسابق رقم: {entry.get('judge_id', '—')}"
+    return entry.get("user_name", "—")
+
+
+def create_or_replace_entry(submission_id, user_id, user_name: str, submission_name: str,
+                             channel_id, message_id, media_type: str) -> dict:
+    """Adds a new entry — storing only a REFERENCE to the file already
+    forwarded into the submissions channel (channel_id + message_id), never
+    the file itself — replacing (deleting) any previous entry by the same
+    user for the same submission ('يحذف المشاركة السابقة ويحتفظ بآخر واحدة
+    فقط'). Preserves the same anonymous judge_id across a replacement so a
+    participant's identity stays consistently hidden/labeled throughout."""
     entries = load_entries()
     key, uid = str(submission_id), str(user_id)
+    existing = next((e for e in entries if str(e.get("submission_id")) == key
+                      and str(e.get("user_id")) == uid), None)
+    judge_id = existing.get("judge_id") if existing else next_judge_id(submission_id)
+
     entries = [e for e in entries if not (str(e.get("submission_id")) == key and str(e.get("user_id")) == uid)]
     entry = {
         "submission_id": key,
+        "submission_name": submission_name,
         "user_id": uid,
         "user_name": user_name or "—",
-        "file_id": file_id,
-        "file_type": file_type,
+        "judge_id": judge_id,
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "file_type": media_type,
         "submitted_at": datetime.utcnow().isoformat(),
         "score": None,
         "rank": None,
@@ -242,6 +330,18 @@ def set_entry_score(submission_id, user_id, score) -> None:
     save_entries(entries)
 
 
+def set_entry_status(submission_id, user_id, status: str) -> None:
+    """Used by the channel's ⭐/❌ moderation buttons (accept/reject a single
+    entry before scoring/finalizing) — see submissions_admin.py."""
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    for e in entries:
+        if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
+            e["status"] = status
+            break
+    save_entries(entries)
+
+
 def finalize_submission(submission_id):
     """Ranks all entries by score (highest first, unscored entries last),
     marks the top `num_winners` as winners (rank 1..N) and the rest as
@@ -256,8 +356,9 @@ def finalize_submission(submission_id):
     num_winners = int(submission.get("num_winners", 0))
 
     entries = entries_for_submission(submission_id)
-    scored = [e for e in entries if e.get("score") is not None]
-    unscored = [e for e in entries if e.get("score") is None]
+    eligible = [e for e in entries if e.get("status") != ENTRY_STATUS_REJECTED]
+    scored = [e for e in eligible if e.get("score") is not None]
+    unscored = [e for e in eligible if e.get("score") is None]
     scored.sort(key=lambda e: e["score"], reverse=True)
     ordered = scored + unscored
 
