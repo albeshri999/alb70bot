@@ -209,8 +209,8 @@ async def handle_distro_view(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"❓ عدد الأسئلة: *{n_q}*",
         time_line,
         "",
-        
-        ,
+        "ℹ️ هذا الاختبار تشخيصي — "
+        "نرجو التركيز أثناء الحل.",
     ]
     if n_q == 0:
         lines.append("\n⚠️ لا توجد أسئلة في هذا الاختبار بعد.")
