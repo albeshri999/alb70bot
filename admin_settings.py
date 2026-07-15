@@ -401,6 +401,7 @@ def build_admin_settings_handler() -> ConversationHandler:
                 CallbackQueryHandler(as_addpick_sel,  pattern=r"^as_addpick_\d+$"),
                 CallbackQueryHandler(as_addpick_page, pattern=r"^as_addpick_page_\d+$"),
                 CallbackQueryHandler(as_add_menu,     pattern="^as_add_menu$"),
+                CallbackQueryHandler(as_add_pick_list, pattern="^as_add_pick_list$"),
                 hub_reentry,
             ],
             AS_ADD_PICK_CONFIRM: [

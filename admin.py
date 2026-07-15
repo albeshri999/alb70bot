@@ -201,7 +201,7 @@ def _stage_manage_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📝 اسم اليوم",             callback_data="stage_name"),
          InlineKeyboardButton("🎯 الكلمة النهائية",       callback_data="stage_final")],
         [InlineKeyboardButton("⏱ مدة الإيقاف",            callback_data="stage_lockout")],
-        [InlineKeyboardButton("🔙 رجوع لقائمة الأيام",   callback_data="back_to_manage"),
+        [InlineKeyboardButton("🔙 رجوع لقائمة الأيام",   callback_data="adm_manage_days"),
          InlineKeyboardButton("⬅️ القائمة الرئيسية",     callback_data="adm_main")],
     ])
 
@@ -2447,6 +2447,7 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(cb_stage_edit_name,   pattern="^stage_name$"),
                 CallbackQueryHandler(cb_stage_edit_final,  pattern="^stage_final$"),
                 CallbackQueryHandler(cb_stage_edit_lockout,pattern="^stage_lockout$"),
+                CallbackQueryHandler(cb_manage_days,       pattern="^adm_manage_days$"),
                 back,
             ],
             # ── Stage add
@@ -2595,6 +2596,7 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(part_unban,        pattern="^part_unban$"),
                 CallbackQueryHandler(part_delete_start, pattern="^part_del$"),
                 CallbackQueryHandler(part_back_to_list, pattern="^part_back_list$"),
+                CallbackQueryHandler(part_detail_handler, pattern=r"^part_detail_\d+$"),
                 back,
             ],
             PART_RENAME: [
