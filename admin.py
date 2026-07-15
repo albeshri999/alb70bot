@@ -97,6 +97,7 @@ def _main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📝 إدارة الاختبارات",       callback_data="adm_quizzes")],
             [InlineKeyboardButton("👥 اختبار توزيع الفرق",     callback_data="adm_distro")],
             [InlineKeyboardButton("💡 إدارة المبادرات",        callback_data="adm_initiatives")],
+            [InlineKeyboardButton("🎭 إدارة المشاركات",        callback_data="adm_submissions")],
             [InlineKeyboardButton("💰 إدارة الأرصدة",          callback_data="adm_balance_menu")],
             [InlineKeyboardButton("📢 الإذاعة",                callback_data="adm_broadcast")],
             [InlineKeyboardButton("🏆 لوحة الشرف",             callback_data="adm_leaderboard")],
@@ -106,6 +107,7 @@ def _main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📝 إدارة الاختبارات",       callback_data="adm_quizzes")],
         [InlineKeyboardButton("👥 اختبار توزيع الفرق",     callback_data="adm_distro")],
         [InlineKeyboardButton("💡 إدارة المبادرات",        callback_data="adm_initiatives")],
+        [InlineKeyboardButton("🎭 إدارة المشاركات",        callback_data="adm_submissions")],
         [InlineKeyboardButton("🏆 إدارة المسابقات",        callback_data="adm_competitions_menu")],
         [InlineKeyboardButton("💰 إدارة الأرصدة",          callback_data="adm_balance_menu")],
         [InlineKeyboardButton("📢 الإذاعة",                callback_data="adm_broadcast")],
@@ -2348,11 +2350,12 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(cb_balance_menu,             pattern="^adm_balance_menu$"),
                 CallbackQueryHandler(cb_broadcast,     pattern="^adm_broadcast$"),
                 CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
-                # NOTE: adm_quizzes / adm_distro / adm_initiatives / adm_admins are
-                # intentionally NOT handled here — they fall through untouched to
-                # their own independent ConversationHandlers (quiz_admin.py /
-                # distro_admin.py / initiatives_admin.py / admin_settings.py),
-                # exactly as before this reorganization.
+                # NOTE: adm_quizzes / adm_distro / adm_initiatives / adm_submissions /
+                # adm_admins are intentionally NOT handled here — they fall through
+                # untouched to their own independent ConversationHandlers
+                # (quiz_admin.py / distro_admin.py / initiatives_admin.py /
+                # submissions_admin.py / admin_settings.py), exactly as before
+                # this reorganization.
             ],
             # ── Participants & stats submenu ("📊 المشاركون والإحصائيات")
             PART_STATS_MENU: [

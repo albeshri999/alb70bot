@@ -28,6 +28,17 @@ BADGE_DEFS = {
     "first_initiative":     {"icon": "💡", "name": "أول مبادر"},
     "active_initiator":     {"icon": "🚀", "name": "مبادر نشيط"},
     "outstanding_initiator": {"icon": "🌟", "name": "مبادر متميز"},
+    # 🎭 Submissions (talent-contest) badges — awarded via
+    # achievements_storage.award_submission_badges(), called from
+    # submissions_admin.py right after a contest's results are finalized.
+    "submission_rank_1":    {"icon": "🥇", "name": "المركز الأول"},
+    "submission_rank_2":    {"icon": "🥈", "name": "المركز الثاني"},
+    "submission_rank_3":    {"icon": "🥉", "name": "المركز الثالث"},
+    "theme_reciter":        {"icon": "📖", "name": "أفضل قارئ"},
+    "theme_muadhin":        {"icon": "🕌", "name": "أفضل مؤذن"},
+    "theme_munshid":        {"icon": "🎤", "name": "أفضل منشِد"},
+    "theme_speaker":        {"icon": "🎙", "name": "أفضل متحدث"},
+    "theme_photographer":   {"icon": "📷", "name": "أفضل مصور"},
     # Examples of future badges — just add a line here, no other code needed
     # to store/display them:
     # "season_champion":    {"icon": "🏆", "name": "بطل الموسم"},
@@ -35,6 +46,17 @@ BADGE_DEFS = {
     # "five_quizzes":       {"icon": "📚", "name": "أكمل 5 اختبارات"},
     # "five_initiatives":   {"icon": "🎯", "name": "نفذ 5 مبادرات"},
 }
+
+# Keyword → theme-badge-type lookup for submission names (extend this list
+# to recognize new contest themes without touching any other code — the
+# first matching keyword wins).
+SUBMISSION_THEME_KEYWORDS = [
+    (("قرآن", "تلاوة"),      "theme_reciter"),
+    (("أذان",),               "theme_muadhin"),
+    (("نشيد", "أناشيد"),      "theme_munshid"),
+    (("تعبير", "متحدث", "حديث"), "theme_speaker"),
+    (("تصوير", "صورة"),       "theme_photographer"),
+]
 
 
 def _load_json(filepath: str, default):
@@ -170,3 +192,31 @@ def check_initiative_completion_badges(user_id) -> None:
         award_badge(user_id, "active_initiator", "active_initiator", "بعد تنفيذ مبادرتين")
     if count >= 3:
         award_badge(user_id, "outstanding_initiator", "outstanding_initiator", "بعد تنفيذ ثلاث مبادرات")
+
+
+def _theme_badge_for(submission_name: str):
+    name = submission_name or ""
+    for keywords, badge_type in SUBMISSION_THEME_KEYWORDS:
+        if any(k in name for k in keywords):
+            return badge_type
+    return None
+
+
+def award_submission_badges(submission_id, submission_name: str, winners: list) -> None:
+    """Called once, right after a '🎭 مشاركة' contest's results are
+    finalized. `winners` is the ordered list of winning entries (each a
+    dict with 'user_id' and 'rank', rank 1 = first place). Awards the
+    🥇/🥈/🥉 rank badges (ranks 1-3 only) plus, to the 1st-place winner
+    only, a theme badge if the contest's name matches a known keyword
+    (see SUBMISSION_THEME_KEYWORDS) — e.g. 'أفضل تلاوة القرآن' → 📖 أفضل قارئ."""
+    rank_types = {1: "submission_rank_1", 2: "submission_rank_2", 3: "submission_rank_3"}
+    for w in winners:
+        rank = w.get("rank")
+        if rank in rank_types:
+            key = f"{rank_types[rank]}_s{submission_id}"
+            award_badge(w.get("user_id"), key, rank_types[rank], f"في مشاركة: {submission_name}")
+        if rank == 1:
+            theme_type = _theme_badge_for(submission_name)
+            if theme_type:
+                theme_key = f"{theme_type}_s{submission_id}"
+                award_badge(w.get("user_id"), theme_key, theme_type, f"في مشاركة: {submission_name}")

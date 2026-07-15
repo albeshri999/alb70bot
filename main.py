@@ -30,6 +30,11 @@ from initiatives_user import (
     handle_menu_my_initiatives,
 )
 from achievements_user import handle_menu_achievements
+from submissions_admin import build_submissions_admin_handler
+from submissions_user import (
+    handle_menu_submissions, handle_submission_view, handle_submission_start,
+    handle_submission_media,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -66,6 +71,9 @@ def main() -> None:
 
     # Initiatives — fully independent ConversationHandler (💡 إدارة المبادرات)
     app.add_handler(build_initiatives_admin_handler())
+
+    # Submissions — fully independent ConversationHandler (🎭 إدارة المشاركات)
+    app.add_handler(build_submissions_admin_handler())
 
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
@@ -105,6 +113,11 @@ def main() -> None:
     # Achievements — participant-facing (🏅 إنجازاتي), fully independent
     app.add_handler(CallbackQueryHandler(handle_menu_achievements, pattern="^menu_achievements$"))
 
+    # Submissions — participant-facing (🎭 المشاركات), fully independent
+    app.add_handler(CallbackQueryHandler(handle_menu_submissions,  pattern="^menu_submissions$"))
+    app.add_handler(CallbackQueryHandler(handle_submission_view,   pattern=r"^sb_view_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_submission_start,  pattern=r"^sb_submit_\w+$"))
+
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))
 
@@ -117,6 +130,15 @@ def main() -> None:
 
     # Day selection
     app.add_handler(CallbackQueryHandler(handle_day_selection, pattern=r"^day_\d+$"))
+
+    # Submissions — file uploads (🎤 صوت / 🎥 فيديو / 📷 صورة). Strict no-op
+    # unless the sending user is currently expected to upload for a specific
+    # submission (see submissions_user.PENDING_KEY) — never interferes with
+    # any other message flow in the bot.
+    app.add_handler(MessageHandler(
+        filters.VOICE | filters.AUDIO | filters.VIDEO | filters.PHOTO,
+        handle_submission_media,
+    ))
 
     # General text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

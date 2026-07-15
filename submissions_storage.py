@@ -1,0 +1,281 @@
+# -*- coding: utf-8 -*-
+"""
+Independent storage layer for '🎭 إدارة المشاركات' (Submissions / talent-contest
+system). Fully self-contained — does NOT read or write any file belonging to
+the word-competition system, the quiz system, the team-distribution system,
+or the initiatives system. Balance changes on winner-crediting go through
+the existing credits.py/transactions.py helpers (called from
+submissions_admin.py), exactly like every other crediting flow in the bot.
+
+All data lives in its own JSON files under data/:
+  - data/submissions.json        → contest definitions ("أفضل تلاوة قرآن"...)
+  - data/submission_entries.json → every participant's uploaded entry
+
+Designed to be easy to extend with new media types later: MEDIA_TYPES is a
+single dict to extend, and entries just store a generic file_id/file_type
+pair — no per-type branching anywhere in the storage layer itself.
+"""
+import json
+import os
+from datetime import datetime
+
+SUBMISSIONS_FILE = "data/submissions.json"
+ENTRIES_FILE      = "data/submission_entries.json"
+
+# ── Media types (extend this dict to support new submission formats) ───────
+MEDIA_TYPES = {
+    "audio": "🎤 تسجيل صوتي",
+    "video": "🎥 فيديو",
+    "photo": "📷 صورة",
+}
+
+ENTRY_STATUS_SUBMITTED = "submitted"
+ENTRY_STATUS_WINNER    = "winner"
+ENTRY_STATUS_PARTICIPANT = "participant"
+
+
+def _load_json(filepath: str, default):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    if not os.path.exists(filepath):
+        return default
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_json(filepath: str, data) -> None:
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ── Submissions (contest definitions) ───────────────────────────────────────
+
+def load_submissions() -> dict:
+    return _load_json(SUBMISSIONS_FILE, {})
+
+
+def save_submissions(data: dict) -> None:
+    _save_json(SUBMISSIONS_FILE, data)
+
+
+def get_submission(submission_id) -> dict:
+    return load_submissions().get(str(submission_id), {})
+
+
+def save_submission(submission_id, data: dict) -> None:
+    submissions = load_submissions()
+    submissions[str(submission_id)] = data
+    save_submissions(submissions)
+
+
+def next_submission_id() -> str:
+    submissions = load_submissions()
+    nums = [int(k) for k in submissions.keys() if str(k).isdigit()]
+    return str((max(nums) + 1) if nums else 1)
+
+
+def create_submission(name: str, description: str, media_type: str, points: int,
+                       num_winners: int, max_score: int, deadline_iso: str,
+                       allow_edit: bool, visible: bool) -> str:
+    submission_id = next_submission_id()
+    save_submission(submission_id, {
+        "id": submission_id,
+        "name": name,
+        "description": description or "",
+        "media_type": media_type,
+        "points": int(points),
+        "num_winners": int(num_winners),
+        "max_score": int(max_score),
+        "deadline": deadline_iso,
+        "allow_edit": bool(allow_edit),
+        "visible": bool(visible),
+        "results_finalized": False,
+        "created_at": datetime.utcnow().isoformat(),
+    })
+    return submission_id
+
+
+def update_submission_field(submission_id, **fields) -> None:
+    submission = get_submission(submission_id)
+    if submission:
+        submission.update(fields)
+        save_submission(submission_id, submission)
+
+
+def set_submission_visible(submission_id, visible: bool) -> None:
+    update_submission_field(submission_id, visible=bool(visible))
+
+
+def delete_submission(submission_id) -> bool:
+    submissions = load_submissions()
+    key = str(submission_id)
+    if key in submissions:
+        del submissions[key]
+        save_submissions(submissions)
+        entries = load_entries()
+        new_entries = [e for e in entries if str(e.get("submission_id")) != key]
+        if len(new_entries) != len(entries):
+            save_entries(new_entries)
+        return True
+    return False
+
+
+def visible_submissions() -> dict:
+    return {k: v for k, v in load_submissions().items() if v.get("visible")}
+
+
+def has_visible_submissions() -> bool:
+    return len(visible_submissions()) > 0
+
+
+def is_deadline_passed(submission: dict) -> bool:
+    deadline = submission.get("deadline")
+    if not deadline:
+        return False
+    try:
+        return datetime.utcnow() >= datetime.fromisoformat(deadline)
+    except Exception:
+        return False
+
+
+def is_open_for_submissions(submission: dict) -> bool:
+    """Whether a participant may still submit/replace an entry right now."""
+    return submission.get("visible", False) and not is_deadline_passed(submission)
+
+
+def can_edit_entry(submission: dict) -> bool:
+    return bool(submission.get("allow_edit")) and not is_deadline_passed(submission)
+
+
+def parse_deadline_text(text: str):
+    """Parses 'YYYY-MM-DD HH:MM' → ISO string, or None if invalid."""
+    text = text.strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def format_deadline(iso_str) -> str:
+    if not iso_str:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "—"
+
+
+# ── Entries (participants' uploaded submissions) ────────────────────────────
+
+def load_entries() -> list:
+    return _load_json(ENTRIES_FILE, [])
+
+
+def save_entries(entries: list) -> None:
+    _save_json(ENTRIES_FILE, entries)
+
+
+def get_entry(submission_id, user_id):
+    key, uid = str(submission_id), str(user_id)
+    for e in load_entries():
+        if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
+            return e
+    return None
+
+
+def has_entry(submission_id, user_id) -> bool:
+    return get_entry(submission_id, user_id) is not None
+
+
+def create_or_replace_entry(submission_id, user_id, user_name: str,
+                             file_id: str, file_type: str) -> dict:
+    """Adds a new entry, replacing (deleting) any previous one by the same
+    user for the same submission — 'يحذف المشاركة السابقة ويحتفظ بآخر واحدة فقط'."""
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    entries = [e for e in entries if not (str(e.get("submission_id")) == key and str(e.get("user_id")) == uid)]
+    entry = {
+        "submission_id": key,
+        "user_id": uid,
+        "user_name": user_name or "—",
+        "file_id": file_id,
+        "file_type": file_type,
+        "submitted_at": datetime.utcnow().isoformat(),
+        "score": None,
+        "rank": None,
+        "status": ENTRY_STATUS_SUBMITTED,
+    }
+    entries.append(entry)
+    save_entries(entries)
+    return entry
+
+
+def delete_entry(submission_id, user_id) -> bool:
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    kept = [e for e in entries if not (str(e.get("submission_id")) == key and str(e.get("user_id")) == uid)]
+    removed = len(kept) != len(entries)
+    if removed:
+        save_entries(kept)
+    return removed
+
+
+def entries_for_submission(submission_id) -> list:
+    key = str(submission_id)
+    out = [e for e in load_entries() if str(e.get("submission_id")) == key]
+    return sorted(out, key=lambda e: e.get("submitted_at", ""))
+
+
+def all_entries() -> list:
+    return load_entries()
+
+
+def set_entry_score(submission_id, user_id, score) -> None:
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    for e in entries:
+        if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
+            e["score"] = score
+            break
+    save_entries(entries)
+
+
+def finalize_submission(submission_id):
+    """Ranks all entries by score (highest first, unscored entries last),
+    marks the top `num_winners` as winners (rank 1..N) and the rest as
+    plain participants, and locks the submission's results. Returns
+    (winners, others) — lists of entry dicts (winners already carry their
+    'rank'). Does NOT credit points or send messages — that's the caller's
+    job (submissions_admin.py), matching how initiatives/quiz crediting
+    already works outside the storage layer."""
+    submission = get_submission(submission_id)
+    if not submission:
+        return [], []
+    num_winners = int(submission.get("num_winners", 0))
+
+    entries = entries_for_submission(submission_id)
+    scored = [e for e in entries if e.get("score") is not None]
+    unscored = [e for e in entries if e.get("score") is None]
+    scored.sort(key=lambda e: e["score"], reverse=True)
+    ordered = scored + unscored
+
+    winners, others = [], []
+    all_entries_data = load_entries()
+    key = str(submission_id)
+    for i, e in enumerate(ordered):
+        is_winner = i < num_winners and e.get("score") is not None
+        rank = i + 1 if is_winner else None
+        status = ENTRY_STATUS_WINNER if is_winner else ENTRY_STATUS_PARTICIPANT
+        for stored in all_entries_data:
+            if str(stored.get("submission_id")) == key and str(stored.get("user_id")) == e.get("user_id"):
+                stored["rank"] = rank
+                stored["status"] = status
+                break
+        e["rank"], e["status"] = rank, status
+        (winners if is_winner else others).append(e)
+
+    save_entries(all_entries_data)
+    update_submission_field(submission_id, results_finalized=True)
+    return winners, others

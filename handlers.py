@@ -58,6 +58,12 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
     except Exception:
         pass
     rows.append([InlineKeyboardButton("📌 مبادراتي", callback_data="menu_my_initiatives")])
+    try:
+        from submissions_storage import has_visible_submissions
+        if has_visible_submissions():
+            rows.append([InlineKeyboardButton("🎭 المشاركات", callback_data="menu_submissions")])
+    except Exception:
+        pass
     rows.append([InlineKeyboardButton("🏅 إنجازاتي", callback_data="menu_achievements")])
     return InlineKeyboardMarkup(rows)
 
