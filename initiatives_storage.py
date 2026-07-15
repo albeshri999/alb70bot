@@ -145,8 +145,31 @@ def remaining_seats(initiative: dict):
 
 def capacity_status_label(initiative: dict) -> str:
     """🟢 مفتوحة / 🔒 اكتمل العدد — purely about accepted-seat capacity,
-    independent of the initiative's visible/hidden toggle."""
+    independent of the initiative's visible/hidden toggle. Kept for
+    backward compatibility with existing callers."""
     return "🔒 اكتمل العدد" if is_full(initiative) else "🟢 مفتوحة"
+
+
+def is_closed(initiative: dict) -> bool:
+    """Manual admin lock — reserved for future use (no UI toggle exists for
+    this yet); always False unless a later feature sets it explicitly."""
+    return bool(initiative.get("closed"))
+
+
+def initiative_status_label(initiative: dict) -> str:
+    """The initiative's own 📍 status (independent of 👁 visibility):
+    ⛔ مغلقة       — manually locked by an admin (reserved for future use)
+    🔒 اكتمل العدد — accepted seats reached the cap
+    🟡 قيد التنفيذ — at least one accepted participant, seats still free
+    🟢 مفتوحة      — no accepted participants yet, open to requests
+    """
+    if is_closed(initiative):
+        return "⛔ مغلقة"
+    if is_full(initiative):
+        return "🔒 اكتمل العدد"
+    if accepted_count(initiative.get("id")) > 0:
+        return "🟡 قيد التنفيذ"
+    return "🟢 مفتوحة"
 
 
 def delete_initiative(initiative_id) -> bool:
@@ -265,6 +288,32 @@ def requests_for_initiative(initiative_id, statuses=None) -> list:
     if statuses:
         out = [r for r in out if r.get("status") in statuses]
     return sorted(out, key=lambda r: r.get("requested_at", ""))
+
+
+def delete_request(initiative_id, user_id) -> bool:
+    """Remove ONE request record entirely (used by 'حذف النتيجة' / 'حذف طلب'
+    in the results-management screens). Does not touch balance — the caller
+    is responsible for reversing any credited points first."""
+    requests = load_requests()
+    key, uid = str(initiative_id), str(user_id)
+    kept = [r for r in requests if not (str(r.get("initiative_id")) == key and str(r.get("user_id")) == uid)]
+    removed = len(kept) != len(requests)
+    if removed:
+        save_requests(kept)
+    return removed
+
+
+def delete_all_requests_by_status(initiative_id, status) -> list:
+    """Remove every request for this initiative with the given status.
+    Returns the list of removed request records (so the caller can reverse
+    any credited points for each one, e.g. for bulk-deleting completions)."""
+    requests = load_requests()
+    key = str(initiative_id)
+    removed = [r for r in requests if str(r.get("initiative_id")) == key and r.get("status") == status]
+    if removed:
+        kept = [r for r in requests if not (str(r.get("initiative_id")) == key and r.get("status") == status)]
+        save_requests(kept)
+    return removed
 
 
 def all_open_requests() -> list:

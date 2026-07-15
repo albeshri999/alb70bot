@@ -2,11 +2,18 @@
 """
 Admin side of the fully independent '💡 إدارة المبادرات' (Initiatives) system.
 
-Design notes (mirrors the quiz/distro admin modules for consistency):
+Design notes (mirrors quiz_admin.py's per-item detail/management page style,
+per the 'إعادة تصميم واجهة إدارة المبادرات' request):
 - Its OWN ConversationHandler, entered from the admin main menu via the
   "adm_initiatives" callback button (the only line added to admin.py).
+- The hub only has: ➕ إنشاء مبادرة / 📋 قائمة المبادرات / 📊 طلبات التنفيذ / 🔙 رجوع.
+- Picking an initiative from the list always opens its own detail/management
+  page (name, description, points, capacity info, visibility, status,
+  creation date) with buttons: ✏️ تعديل / 👁 إظهار-إخفاء / 🧹 إدارة النتائج /
+  🗑 حذف / 🔙 رجوع — exactly mirroring how quiz_admin.py's per-quiz menu works.
 - All data lives in initiatives_storage.py (its own JSON files). Balance
-  changes on "تم التنفيذ" go through the existing credits.py/transactions.py
+  changes on "تم التنفيذ" (and their reversal when an admin deletes a
+  completed result) go through the existing credits.py/transactions.py
   helpers, exactly like the quiz-results-crediting flow — nothing here
   touches days.json/users.json/quizzes.json/etc. directly.
 - Achievement checks (أول مبادر / مبادر نشيط / مبادر متميز) are delegated to
@@ -31,11 +38,13 @@ import transactions
 logger = logging.getLogger(__name__)
 
 # ── States ────────────────────────────────────────────────────────────────────
-(IN_HUB, IN_LIST, IN_ITEM_MENU, IN_DEL_CONFIRM,
+(IN_HUB, IN_LIST, IN_DETAIL, IN_DEL_CONFIRM,
  IN_C_NAME, IN_C_DESC, IN_C_POINTS, IN_C_MAX, IN_C_VISIBLE,
  IN_EDIT_MENU, IN_E_NAME, IN_E_DESC, IN_E_POINTS, IN_E_MAX,
+ IN_VIS_MENU,
+ IN_RES_MENU, IN_RES_LIST, IN_RES_DETAIL,
  IN_REQ_FILTER, IN_REQ_LIST, IN_REQ_DETAIL,
- ) = range(17)
+ ) = range(20)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -68,17 +77,23 @@ def _yn(yes_cb: str, no_cb: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def _fmt_date(iso_str) -> str:
+    if not iso_str:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "—"
+
+
 # ── Hub ───────────────────────────────────────────────────────────────────────
 
 def _hub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ إنشاء مبادرة", callback_data="in_create")],
-        [InlineKeyboardButton("📋 قائمة المبادرات", callback_data="in_list_view")],
-        [InlineKeyboardButton("✏️ تعديل مبادرة", callback_data="in_list_edit")],
-        [InlineKeyboardButton("🗑 حذف مبادرة", callback_data="in_list_delete")],
-        [InlineKeyboardButton("👁 إظهار / إخفاء المبادرة", callback_data="in_list_toggle")],
+        [InlineKeyboardButton("📋 قائمة المبادرات", callback_data="in_list")],
         [InlineKeyboardButton("📊 طلبات التنفيذ", callback_data="in_requests")],
-        [InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")],
     ])
 
 
@@ -90,12 +105,12 @@ async def in_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
     context.user_data.pop("in_initiative_id", None)
-    context.user_data.pop("in_action", None)
+    context.user_data.pop("in_res_status", None)
     await _reply(update, "💡 *إدارة المبادرات*\n\nاختر العملية:", _hub_kb())
     return IN_HUB
 
 
-# ── Initiative list (shared by view/edit/delete/toggle actions) ─────────────
+# ── Initiatives list ─────────────────────────────────────────────────────────
 
 def _list_kb() -> InlineKeyboardMarkup:
     items = ins.load_initiatives()
@@ -107,14 +122,6 @@ def _list_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def in_list_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action = query.data.replace("in_list_", "")  # view | edit | delete | toggle
-    context.user_data["in_action"] = action
-    return await _show_list(update, context)
-
-
 async def _show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = ins.load_initiatives()
     if not items:
@@ -123,37 +130,63 @@ async def _show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")]]),
         )
         return IN_LIST
-
     await _reply(update, "📋 *قائمة المبادرات*\n\nاختر مبادرة:", _list_kb())
     return IN_LIST
 
 
-async def in_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generic 'رجوع' target for any screen reached from the initiatives
-    list (view / toggle / edit / delete-confirm) — always returns to that
-    same list, never straight to the hub."""
+async def in_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     return await _show_list(update, context)
 
 
-def _initiative_summary(initiative: dict) -> str:
-    visibility = "👁 ظاهرة" if initiative.get("visible") else "🙈 مخفية"
-    requests = ins.requests_for_initiative(initiative.get("id"))
-    completed = sum(1 for r in requests if r.get("status") == ins.STATUS_COMPLETED)
+async def in_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'رجوع' target for the per-initiative detail page — always returns to
+    the initiatives list (its logical parent screen)."""
+    await update.callback_query.answer()
+    return await _show_list(update, context)
+
+
+# ── Per-initiative detail / management page ──────────────────────────────────
+
+def _initiative_detail_text(initiative: dict) -> str:
+    requests  = ins.requests_for_initiative(initiative.get("id"))
     pending   = sum(1 for r in requests if r.get("status") == ins.STATUS_PENDING)
     max_p     = ins.get_max_participants(initiative)
     max_line  = str(max_p) if max_p else "بدون حد أقصى"
+    remaining = ins.remaining_seats(initiative)
+    remaining_line = str(remaining) if remaining is not None else "بدون حد أقصى"
+    visibility = "✅ ظاهرة" if initiative.get("visible") else "🙈 مخفية"
     return (
         f"💡 *{initiative.get('name')}*\n\n"
-        f"{initiative.get('description') or '—'}\n\n"
-        f"🏆 النقاط: *{initiative.get('points', 0)}*\n"
-        f"👥 الحد الأقصى: *{max_line}*\n"
-        f"✅ المقبولون: *{ins.accepted_count(initiative.get('id'))}*\n"
-        f"📨 الطلبات قيد الانتظار: *{pending}*\n"
-        f"الحالة: *{ins.capacity_status_label(initiative)}*\n"
-        f"الظهور: *{visibility}*\n"
-        f"📋 عدد الطلبات: *{len(requests)}*  —  ✔️ منفَّذة: *{completed}*"
+        f"📄 {initiative.get('description') or '—'}\n\n"
+        f"🏆 عدد النقاط: *{initiative.get('points', 0)}*\n"
+        f"👥 الحد الأقصى للمقبولين: *{max_line}*\n"
+        f"✅ عدد المقبولين: *{ins.accepted_count(initiative.get('id'))}*\n"
+        f"📨 عدد الطلبات قيد الانتظار: *{pending}*\n"
+        f"📌 المقاعد المتبقية: *{remaining_line}*\n"
+        f"👁 حالة الظهور: *{visibility}*\n"
+        f"📍 حالة المبادرة: *{ins.initiative_status_label(initiative)}*\n"
+        f"📅 تاريخ الإنشاء: {_fmt_date(initiative.get('created_at'))}"
     )
+
+
+def _detail_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تعديل المبادرة", callback_data="in_detail_edit")],
+        [InlineKeyboardButton("👁 إظهار / إخفاء المبادرة", callback_data="in_detail_vis")],
+        [InlineKeyboardButton("🧹 إدارة النتائج", callback_data="in_detail_results")],
+        [InlineKeyboardButton("🗑 حذف المبادرة", callback_data="in_detail_delete")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")],
+    ])
+
+
+async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, prefix: str = ""):
+    initiative_id = context.user_data.get("in_initiative_id")
+    initiative = ins.get_initiative(initiative_id)
+    if not initiative:
+        return await _show_list(update, context)
+    await _reply(update, prefix + _initiative_detail_text(initiative), _detail_kb())
+    return IN_DETAIL
 
 
 async def in_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,41 +194,32 @@ async def in_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     initiative_id = query.data.replace("in_pick_", "")
     context.user_data["in_initiative_id"] = initiative_id
-    action = context.user_data.get("in_action", "view")
+    return await _show_detail(update, context)
+
+
+async def in_back_to_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'رجوع' target for any screen reached from the detail page (edit menu /
+    visibility menu / results menu / delete-confirm) — always returns to
+    that same initiative's detail page, never straight to the list or hub."""
+    await update.callback_query.answer()
+    return await _show_detail(update, context)
+
+
+# ── Delete initiative ──────────────────────────────────────────────────────────
+
+async def in_detail_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
     initiative = ins.get_initiative(initiative_id)
     if not initiative:
-        return await in_hub(update, context)
-
-    if action == "view":
-        await _reply(
-            update, _initiative_summary(initiative),
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")]]),
-        )
-        return IN_LIST
-
-    if action == "toggle":
-        ins.set_initiative_visible(initiative_id, not initiative.get("visible"))
-        initiative = ins.get_initiative(initiative_id)
-        await _reply(
-            update, "✅ تم التحديث.\n\n" + _initiative_summary(initiative),
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")]]),
-        )
-        return IN_LIST
-
-    if action == "delete":
-        await _reply(
-            update,
-            f"🗑 هل تريد حذف مبادرة *{initiative.get('name')}*؟\n\n"
-            "سيتم حذف جميع طلباتها أيضاً.",
-            _yn("in_delete_yes", "in_back_to_list"),
-        )
-        return IN_DEL_CONFIRM
-
-    if action == "edit":
-        await _reply(update, _initiative_summary(initiative) + "\n\nاختر ما تريد تعديله:", _edit_menu_kb())
-        return IN_EDIT_MENU
-
-    return await in_hub(update, context)
+        return await _show_list(update, context)
+    await _reply(
+        update,
+        f"🗑 هل تريد حذف مبادرة *{initiative.get('name')}*؟\n\n"
+        "سيتم حذف جميع طلباتها أيضاً.",
+        _yn("in_delete_yes", "in_back_to_detail"),
+    )
+    return IN_DEL_CONFIRM
 
 
 async def in_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -282,12 +306,18 @@ async def in_vis_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _edit_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 اسم المبادرة", callback_data="in_e_name")],
-        [InlineKeyboardButton("🗒 الوصف", callback_data="in_e_desc")],
-        [InlineKeyboardButton("🔢 عدد النقاط", callback_data="in_e_points")],
+        [InlineKeyboardButton("📝 تعديل الاسم", callback_data="in_e_name")],
+        [InlineKeyboardButton("📄 تعديل الوصف", callback_data="in_e_desc")],
+        [InlineKeyboardButton("🏆 تعديل عدد النقاط", callback_data="in_e_points")],
         [InlineKeyboardButton("👥 تعديل الحد الأقصى للمقبولين", callback_data="in_e_max")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")],
     ])
+
+
+async def in_detail_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update, "✏️ *تعديل المبادرة*\n\nاختر ما تريد تعديله:", _edit_menu_kb())
+    return IN_EDIT_MENU
 
 
 async def in_e_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,18 +380,229 @@ async def in_e_max_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initiative_id = context.user_data.get("in_initiative_id")
     ins.update_initiative_field(initiative_id, max_participants=int(text))
     initiative = ins.get_initiative(initiative_id)
-    # Raising the cap (or lowering it while seats are still free) simply
-    # lets is_full() re-evaluate to False on its own next check — no extra
-    # bookkeeping needed here. Existing accepted participants are never
-    # removed when the cap is lowered below the current accepted count;
-    # new acceptances are just blocked until the count drops under the cap.
-    note = "🔒 اكتمل العدد" if ins.is_full(initiative) else "🟢 المبادرة مفتوحة لاستقبال طلبات جديدة"
-    await update.message.reply_text(f"✅ تم تحديث الحد الأقصى.\n\nالحالة الآن: {note}",
-                                     reply_markup=_edit_menu_kb())
+    # Raising the cap (or lowering it while seats are still free) simply lets
+    # is_full()/initiative_status_label() re-evaluate on their own next
+    # check — no extra bookkeeping needed. Existing accepted participants are
+    # never removed when the cap is lowered below the current accepted
+    # count; new acceptances are just blocked until the count drops under it.
+    await update.message.reply_text(
+        f"✅ تم تحديث الحد الأقصى.\n\nالحالة الآن: {ins.initiative_status_label(initiative)}",
+        reply_markup=_edit_menu_kb(),
+    )
     return IN_EDIT_MENU
 
 
-# ── Execution requests (📊 طلبات التنفيذ) ──────────────────────────────────
+# ── Show/hide initiative (confirm-first) ──────────────────────────────────────
+
+def _vis_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👁 إظهار", callback_data="in_vis_show"),
+         InlineKeyboardButton("🙈 إخفاء", callback_data="in_vis_hide")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")],
+    ])
+
+
+async def in_detail_vis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    initiative = ins.get_initiative(initiative_id)
+    if not initiative:
+        return await _show_list(update, context)
+    current = "✅ ظاهرة" if initiative.get("visible") else "🙈 مخفية"
+    await _reply(update, f"👁 الحالة الحالية:\n\n*{current}*", _vis_menu_kb())
+    return IN_VIS_MENU
+
+
+async def in_vis_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    initiative = ins.get_initiative(initiative_id)
+    if not initiative:
+        return await _show_list(update, context)
+    if initiative.get("visible"):
+        await _reply(update, "ℹ️ المبادرة ظاهرة بالفعل.", _vis_menu_kb())
+        return IN_VIS_MENU
+    ins.set_initiative_visible(initiative_id, True)
+    await _reply(update, "✅ تم إظهار المبادرة.\n\nالحالة الحالية:\n\n*✅ ظاهرة*", _vis_menu_kb())
+    return IN_VIS_MENU
+
+
+async def in_vis_hide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    initiative = ins.get_initiative(initiative_id)
+    if not initiative:
+        return await _show_list(update, context)
+    if not initiative.get("visible"):
+        await _reply(update, "ℹ️ المبادرة مخفية بالفعل.", _vis_menu_kb())
+        return IN_VIS_MENU
+    ins.set_initiative_visible(initiative_id, False)
+    await _reply(update, "✅ تم إخفاء المبادرة.\n\nالحالة الحالية:\n\n*🙈 مخفية*", _vis_menu_kb())
+    return IN_VIS_MENU
+
+
+# ── Results management ("🧹 إدارة النتائج") ─────────────────────────────────
+#
+# Three categories, scoped to the CURRENT initiative only:
+#   ✔ النتائج المكتملة   — deleting one reverses its credited points
+#   ❌ الطلبات المرفوضة   — deleting one is pure data cleanup (no balance effect)
+#   🚫 الطلبات الملغاة    — same as rejected
+#
+# Deleting a request here removes it entirely, which also means it's no
+# longer counted anywhere (accepted_count, "one active initiative" gate,
+# etc.) — the participant is free to request again, per the requirement.
+
+_RES_CATEGORIES = {
+    "completed": (ins.STATUS_COMPLETED, "✔ النتائج المكتملة"),
+    "rejected":  (ins.STATUS_REJECTED,  "❌ الطلبات المرفوضة"),
+    "cancelled": (ins.STATUS_CANCELLED, "🚫 الطلبات الملغاة"),
+}
+
+
+def _res_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✔ النتائج المكتملة", callback_data="in_res_cat_completed")],
+        [InlineKeyboardButton("❌ الطلبات المرفوضة", callback_data="in_res_cat_rejected")],
+        [InlineKeyboardButton("🚫 الطلبات الملغاة", callback_data="in_res_cat_cancelled")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")],
+    ])
+
+
+async def in_detail_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update, "🧹 *إدارة النتائج*\n\nاختر الفئة:", _res_menu_kb())
+    return IN_RES_MENU
+
+
+def _res_list_kb(category: str, items: list) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"{r.get('user_name', '—')} — {_fmt_date(r.get('requested_at'))}",
+                               callback_data=f"in_resitem_{r['user_id']}")]
+        for r in items
+    ]
+    if items:
+        rows.append([InlineKeyboardButton("🗑 حذف الكل", callback_data=f"in_res_delall_{category}")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="in_detail_results")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show_res_list(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
+    initiative_id = context.user_data.get("in_initiative_id")
+    status, label = _RES_CATEGORIES[category]
+    context.user_data["in_res_status"] = category
+    items = ins.requests_for_initiative(initiative_id, statuses=(status,))
+    if not items:
+        await _reply(
+            update, f"📭 لا توجد عناصر في: {label}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_detail_results")]]),
+        )
+        return IN_RES_LIST
+    await _reply(update, f"{label}\n\nاختر عنصراً:", _res_list_kb(category, items))
+    return IN_RES_LIST
+
+
+async def in_res_cat_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = query.data.replace("in_res_cat_", "")
+    return await _show_res_list(update, context, category)
+
+
+async def in_res_back_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    category = context.user_data.get("in_res_status", "completed")
+    return await _show_res_list(update, context, category)
+
+
+async def in_resitem_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.data.replace("in_resitem_", "")
+    initiative_id = context.user_data.get("in_initiative_id")
+    context.user_data["in_res_user_id"] = user_id
+
+    r = ins.get_request(initiative_id, user_id)
+    initiative = ins.get_initiative(initiative_id)
+    category = context.user_data.get("in_res_status", "completed")
+    if not r or not initiative:
+        return await _show_res_list(update, context, category)
+
+    status, label = _RES_CATEGORIES[category]
+    lines = [
+        f"{label}\n",
+        f"👤 *{r.get('user_name', '—')}*",
+        f"📅 وقت الطلب: {_fmt_date(r.get('requested_at'))}",
+    ]
+    if category == "completed":
+        pts = r.get("points_awarded", initiative.get("points", 0))
+        lines.append(f"🏆 النقاط الممنوحة: *{pts}*")
+        del_label = "🗑 حذف النتيجة"
+    else:
+        del_label = "🗑 حذف الطلب"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(del_label, callback_data="in_resitem_delete")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_res_back_list")],
+    ])
+    await _reply(update, "\n".join(lines), kb)
+    return IN_RES_DETAIL
+
+
+async def in_resitem_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    user_id       = context.user_data.get("in_res_user_id")
+    category      = context.user_data.get("in_res_status", "completed")
+    initiative    = ins.get_initiative(initiative_id)
+    r             = ins.get_request(initiative_id, user_id)
+
+    if category == "completed" and r:
+        pts = int(r.get("points_awarded", initiative.get("points", 0)) if initiative else r.get("points_awarded", 0))
+        user_obj  = get_user(int(user_id)) or {}
+        full_name = user_obj.get("full_name") or "—"
+        bal_before = credits.get_balance(int(user_id))
+        bal_after  = credits.add_credits(int(user_id), -pts)
+        transactions.record(
+            int(user_id), full_name, "initiative_result_remove", pts, bal_before, bal_after,
+            f"حذف نتيجة مبادرة: {initiative.get('name', '—') if initiative else '—'}",
+        )
+
+    ins.delete_request(initiative_id, user_id)
+    await update.callback_query.answer("✅ تم الحذف.")
+    return await _show_res_list(update, context, category)
+
+
+async def in_res_delall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = query.data.replace("in_res_delall_", "")
+    status, label = _RES_CATEGORIES.get(category, (None, ""))
+    initiative_id = context.user_data.get("in_initiative_id")
+    initiative = ins.get_initiative(initiative_id)
+
+    removed = ins.delete_all_requests_by_status(initiative_id, status)
+
+    if category == "completed":
+        for r in removed:
+            uid = r.get("user_id")
+            pts = int(r.get("points_awarded", initiative.get("points", 0)) if initiative else r.get("points_awarded", 0))
+            user_obj  = get_user(int(uid)) or {}
+            full_name = user_obj.get("full_name") or "—"
+            bal_before = credits.get_balance(int(uid))
+            bal_after  = credits.add_credits(int(uid), -pts)
+            transactions.record(
+                int(uid), full_name, "initiative_result_remove", pts, bal_before, bal_after,
+                f"حذف نتيجة مبادرة (حذف جماعي): {initiative.get('name', '—') if initiative else '—'}",
+            )
+
+    await _reply(
+        update, f"✅ تم حذف *{len(removed)}* عنصر من: {label}",
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_detail_results")]]),
+    )
+    return IN_RES_LIST
+
+
+# ── Execution requests ("📊 طلبات التنفيذ") — hub-level, all initiatives ────
 
 _FILTER_BUTTONS = [
     ("📋 كل الطلبات",     None),
@@ -386,7 +627,8 @@ def _req_label(r: dict) -> str:
     initiative = ins.get_initiative(r.get("initiative_id"))
     name = initiative.get("name", "—")
     status_label = ins.STATUS_LABELS.get(r.get("status"), r.get("status"))
-    return f"{r.get('user_name', '—')} — {name} — {status_label}"
+    when = _fmt_date(r.get("requested_at"))
+    return f"{r.get('user_name', '—')} — {name} — {when} — {status_label}"
 
 
 def _filter_menu_kb() -> InlineKeyboardMarkup:
@@ -428,7 +670,7 @@ async def _show_req_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]]),
         )
         return IN_REQ_LIST
-    await _reply(update, "📊 *طلبات التنفيذ*\n\nمرتبة حسب وقت الطلب (الأول فالأول):", _req_list_kb(status))
+    await _reply(update, "📊 *طلبات التنفيذ*\n\nمرتبة حسب وقت الطلب (الأقدم فالأحدث):", _req_list_kb(status))
     return IN_REQ_LIST
 
 
@@ -449,6 +691,7 @@ async def in_req_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 *{r.get('user_name', '—')}*\n"
         f"💡 المبادرة: *{initiative.get('name')}*\n"
         f"🏆 النقاط: *{initiative.get('points', 0)}*\n"
+        f"📅 وقت الطلب: {_fmt_date(r.get('requested_at'))}\n"
         f"الحالة: *{ins.STATUS_LABELS.get(r.get('status'), r.get('status'))}*\n"
     )
     if r.get("status") == ins.STATUS_PENDING:
@@ -553,7 +796,8 @@ async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points        = int(initiative.get("points", 0)) if initiative else 0
 
     ins.set_request_status(initiative_id, user_id, ins.STATUS_COMPLETED,
-                            completed_at=datetime.utcnow().isoformat())
+                            completed_at=datetime.utcnow().isoformat(),
+                            points_awarded=points)
 
     user_obj  = get_user(int(user_id)) or {}
     full_name = user_obj.get("full_name") or "—"
@@ -599,24 +843,30 @@ async def in_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_initiatives_admin_handler() -> ConversationHandler:
     hub_reentry = CallbackQueryHandler(in_hub, pattern="^in_hub$")
-    list_entry  = CallbackQueryHandler(in_list_entry, pattern=r"^in_list_(view|edit|delete|toggle)$")
 
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(in_hub, pattern="^adm_initiatives$")],
         states={
             IN_HUB: [
                 CallbackQueryHandler(in_create,   pattern="^in_create$"),
+                CallbackQueryHandler(in_list,     pattern="^in_list$"),
                 CallbackQueryHandler(in_requests, pattern="^in_requests$"),
-                list_entry,
             ],
             IN_LIST: [
                 CallbackQueryHandler(in_pick, pattern=r"^in_pick_\w+$"),
-                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
-                list_entry, hub_reentry,
+                hub_reentry,
+            ],
+            IN_DETAIL: [
+                CallbackQueryHandler(in_detail_edit,    pattern="^in_detail_edit$"),
+                CallbackQueryHandler(in_detail_vis,     pattern="^in_detail_vis$"),
+                CallbackQueryHandler(in_detail_results, pattern="^in_detail_results$"),
+                CallbackQueryHandler(in_detail_delete,  pattern="^in_detail_delete$"),
+                CallbackQueryHandler(in_back_to_list,   pattern="^in_back_to_list$"),
+                hub_reentry,
             ],
             IN_DEL_CONFIRM: [
-                CallbackQueryHandler(in_delete_yes, pattern="^in_delete_yes$"),
-                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
+                CallbackQueryHandler(in_delete_yes,     pattern="^in_delete_yes$"),
+                CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
                 hub_reentry,
             ],
             IN_C_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_name), hub_reentry],
@@ -629,17 +879,39 @@ def build_initiatives_admin_handler() -> ConversationHandler:
                 hub_reentry,
             ],
             IN_EDIT_MENU: [
-                CallbackQueryHandler(in_e_name,   pattern="^in_e_name$"),
-                CallbackQueryHandler(in_e_desc,   pattern="^in_e_desc$"),
-                CallbackQueryHandler(in_e_points, pattern="^in_e_points$"),
-                CallbackQueryHandler(in_e_max,    pattern="^in_e_max$"),
-                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
+                CallbackQueryHandler(in_e_name,         pattern="^in_e_name$"),
+                CallbackQueryHandler(in_e_desc,         pattern="^in_e_desc$"),
+                CallbackQueryHandler(in_e_points,       pattern="^in_e_points$"),
+                CallbackQueryHandler(in_e_max,          pattern="^in_e_max$"),
+                CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
                 hub_reentry,
             ],
             IN_E_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_name_val), hub_reentry],
             IN_E_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_desc_val), hub_reentry],
             IN_E_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_points_val), hub_reentry],
             IN_E_MAX:    [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_max_val), hub_reentry],
+            IN_VIS_MENU: [
+                CallbackQueryHandler(in_vis_show,       pattern="^in_vis_show$"),
+                CallbackQueryHandler(in_vis_hide,       pattern="^in_vis_hide$"),
+                CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
+                hub_reentry,
+            ],
+            IN_RES_MENU: [
+                CallbackQueryHandler(in_res_cat_sel,    pattern=r"^in_res_cat_\w+$"),
+                CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
+                hub_reentry,
+            ],
+            IN_RES_LIST: [
+                CallbackQueryHandler(in_resitem_sel,    pattern=r"^in_resitem_\w+$"),
+                CallbackQueryHandler(in_res_delall,     pattern=r"^in_res_delall_\w+$"),
+                CallbackQueryHandler(in_detail_results, pattern="^in_detail_results$"),
+                hub_reentry,
+            ],
+            IN_RES_DETAIL: [
+                CallbackQueryHandler(in_resitem_delete, pattern="^in_resitem_delete$"),
+                CallbackQueryHandler(in_res_back_list,  pattern="^in_res_back_list$"),
+                hub_reentry,
+            ],
             IN_REQ_FILTER: [
                 CallbackQueryHandler(in_req_filter_sel, pattern=r"^in_reqf_\w+$"),
                 hub_reentry,
