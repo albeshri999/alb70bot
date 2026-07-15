@@ -24,6 +24,7 @@ STATUS_ACCEPTED  = "accepted"
 STATUS_REJECTED  = "rejected"
 STATUS_COMPLETED = "completed"
 STATUS_CANCELLED = "cancelled"
+STATUS_EXCLUDED  = "excluded"
 
 # Statuses that count as "this participant currently has an open initiative"
 # — blocks them from requesting any other initiative until resolved.
@@ -35,6 +36,20 @@ STATUS_LABELS = {
     STATUS_COMPLETED: "✔ مكتملة",
     STATUS_REJECTED:  "❌ مرفوضة",
     STATUS_CANCELLED: "🚫 ملغاة",
+    STATUS_EXCLUDED:  "🚫 مستبعد",
+}
+
+# ── Initiative-level status (📍 حالة المبادرة) ───────────────────────────────
+INIT_STATUS_OPEN        = "open"         # 🟢 مفتوحة — accepting requests
+INIT_STATUS_IN_PROGRESS = "in_progress"  # 🟡 قيد التنفيذ — executors chosen, locked
+INIT_STATUS_COMPLETED   = "completed"    # ✔ مكتملة — every executor's work approved
+INIT_STATUS_CLOSED      = "closed"       # ⛔ مغلقة — manually closed by an admin
+
+INIT_STATUS_LABELS = {
+    INIT_STATUS_OPEN:        "🟢 مفتوحة",
+    INIT_STATUS_IN_PROGRESS: "🟡 قيد التنفيذ",
+    INIT_STATUS_COMPLETED:   "✔ مكتملة",
+    INIT_STATUS_CLOSED:      "⛔ مغلقة",
 }
 
 
@@ -87,11 +102,14 @@ def create_initiative(name: str, description: str, points: int, visible: bool,
         "description": description or "",
         "points": int(points),
         "visible": bool(visible),
-        # Maximum number of ACCEPTED participants this initiative can hold.
-        # None means unlimited — this is also the default for initiatives
-        # created before this feature existed, so they keep working exactly
-        # as before (never auto-locking).
+        # Maximum number of EXECUTORS (accepted+completed participants) this
+        # initiative can hold. None means unlimited — this is also the
+        # default for initiatives created before this feature existed, so
+        # they keep accepting requests unchanged (never auto-locking).
         "max_participants": int(max_participants) if max_participants else None,
+        # Explicit status machine (📍 حالة المبادرة) — see INIT_STATUS_*
+        # constants above. Requests are only accepted while this is "open".
+        "status": INIT_STATUS_OPEN,
         "created_at": datetime.utcnow().isoformat(),
     })
     return initiative_id
@@ -113,13 +131,29 @@ def get_max_participants(initiative: dict):
     return initiative.get("max_participants")
 
 
+def get_initiative_status(initiative: dict) -> str:
+    """Defaults to 'open' — covers initiatives created before this field
+    existed, so they keep accepting requests exactly as before."""
+    return initiative.get("status") or INIT_STATUS_OPEN
+
+
+def set_initiative_status(initiative_id, status: str) -> None:
+    update_initiative_field(initiative_id, status=status)
+
+
+def is_open_for_requests(initiative: dict) -> bool:
+    """The ONLY gate on new execution requests — whether the initiative's
+    own status is 'open'. Capacity is never checked here: an open
+    initiative accepts unlimited requests regardless of max_participants;
+    the admin picks executors manually afterwards (see accept_participant())."""
+    return get_initiative_status(initiative) == INIT_STATUS_OPEN
+
+
 def accepted_count(initiative_id) -> int:
-    """How many participants currently hold an ACCEPTED slot on this
-    initiative. Completed requests still occupy their slot (they were
-    accepted at some point and the seat was used), but rejected/cancelled
-    requests never did (or no longer do) — this reflects real accepted
-    participants, not just raw request counts, per the requirement that the
-    initiative must only auto-lock once truly-accepted seats run out."""
+    """How many participants currently hold an executor slot on this
+    initiative (accepted-and-working, or already completed). Rejected,
+    cancelled, and excluded requests never occupy (or no longer occupy) a
+    slot — this is the count compared against max_participants."""
     key = str(initiative_id)
     return sum(
         1 for r in load_requests()
@@ -127,7 +161,18 @@ def accepted_count(initiative_id) -> int:
     )
 
 
+def active_executor_count(initiative_id) -> int:
+    """How many executors are currently ACCEPTED but not yet marked
+    completed — used to detect 'every executor finished' (→ ✔ مكتملة)."""
+    key = str(initiative_id)
+    return sum(1 for r in load_requests()
+               if str(r.get("initiative_id")) == key and r.get("status") == STATUS_ACCEPTED)
+
+
 def is_full(initiative: dict) -> bool:
+    """True once accepted_count reaches max_participants. Used only to
+    decide when to auto-lock an 'open' initiative into 'in_progress' —
+    never to block requests (see is_open_for_requests())."""
     max_p = get_max_participants(initiative)
     if not max_p:
         return False
@@ -135,7 +180,7 @@ def is_full(initiative: dict) -> bool:
 
 
 def remaining_seats(initiative: dict):
-    """None if unlimited, otherwise how many accepted-slots are still free
+    """None if unlimited, otherwise how many executor-slots are still free
     (never negative)."""
     max_p = get_max_participants(initiative)
     if not max_p:
@@ -143,33 +188,96 @@ def remaining_seats(initiative: dict):
     return max(0, int(max_p) - accepted_count(initiative.get("id")))
 
 
-def capacity_status_label(initiative: dict) -> str:
-    """🟢 مفتوحة / 🔒 اكتمل العدد — purely about accepted-seat capacity,
-    independent of the initiative's visible/hidden toggle. Kept for
-    backward compatibility with existing callers."""
-    return "🔒 اكتمل العدد" if is_full(initiative) else "🟢 مفتوحة"
-
-
-def is_closed(initiative: dict) -> bool:
-    """Manual admin lock — reserved for future use (no UI toggle exists for
-    this yet); always False unless a later feature sets it explicitly."""
-    return bool(initiative.get("closed"))
-
-
 def initiative_status_label(initiative: dict) -> str:
-    """The initiative's own 📍 status (independent of 👁 visibility):
-    ⛔ مغلقة       — manually locked by an admin (reserved for future use)
-    🔒 اكتمل العدد — accepted seats reached the cap
-    🟡 قيد التنفيذ — at least one accepted participant, seats still free
-    🟢 مفتوحة      — no accepted participants yet, open to requests
-    """
-    if is_closed(initiative):
-        return "⛔ مغلقة"
-    if is_full(initiative):
-        return "🔒 اكتمل العدد"
-    if accepted_count(initiative.get("id")) > 0:
-        return "🟡 قيد التنفيذ"
-    return "🟢 مفتوحة"
+    return INIT_STATUS_LABELS.get(get_initiative_status(initiative), INIT_STATUS_LABELS[INIT_STATUS_OPEN])
+
+
+def accept_participant(initiative_id, user_id) -> list:
+    """Accept one pending participant as an executor. If this fills the
+    last available seat, automatically locks the initiative ('in_progress')
+    and mass-rejects every other still-pending request for it. Returns the
+    list of request records that were just auto-rejected (each still has
+    its 'user_id') so the caller can notify them — empty list if the
+    initiative didn't just become full."""
+    set_request_status(initiative_id, user_id, STATUS_ACCEPTED,
+                        decided_at=datetime.utcnow().isoformat())
+
+    initiative = get_initiative(initiative_id)
+    if not initiative:
+        return []
+    max_p = get_max_participants(initiative)
+    if not max_p or accepted_count(initiative_id) < int(max_p):
+        return []  # still open — either unlimited or seats remain
+
+    # Last seat just filled — lock the initiative and mass-reject the rest.
+    set_initiative_status(initiative_id, INIT_STATUS_IN_PROGRESS)
+    return reject_all_pending(initiative_id)
+
+
+def reject_all_pending(initiative_id) -> list:
+    """Reject every still-PENDING request for this initiative (used both
+    when the initiative auto-locks and is available for manual bulk use).
+    Returns the list of request records that were rejected."""
+    requests = load_requests()
+    key = str(initiative_id)
+    rejected = []
+    now = datetime.utcnow().isoformat()
+    for r in requests:
+        if str(r.get("initiative_id")) == key and r.get("status") == STATUS_PENDING:
+            r["status"] = STATUS_REJECTED
+            r["decided_at"] = now
+            rejected.append(r)
+    if rejected:
+        save_requests(requests)
+    return rejected
+
+
+def complete_participant(initiative_id, user_id, points_awarded: int) -> bool:
+    """Mark one executor's work as approved/completed. Returns True if this
+    was the LAST remaining active executor — i.e. the initiative should now
+    be marked ✔ مكتملة (every chosen executor's work has been approved)."""
+    set_request_status(initiative_id, user_id, STATUS_COMPLETED,
+                        completed_at=datetime.utcnow().isoformat(),
+                        points_awarded=points_awarded)
+    if active_executor_count(initiative_id) == 0:
+        initiative = get_initiative(initiative_id)
+        if initiative and get_initiative_status(initiative) == INIT_STATUS_IN_PROGRESS:
+            set_initiative_status(initiative_id, INIT_STATUS_COMPLETED)
+            return True
+    return False
+
+
+def _remove_executor(initiative_id, user_id, new_status: str, **extra) -> bool:
+    """Shared logic for any action that removes an ACCEPTED executor
+    (excluding them, or cancelling their acceptance) — sets their request to
+    `new_status` and, if that frees a seat below the cap on a locked
+    ('in_progress') initiative, automatically reopens it. Returns True if
+    the initiative was just reopened."""
+    set_request_status(initiative_id, user_id, new_status, **extra)
+
+    initiative = get_initiative(initiative_id)
+    if not initiative:
+        return False
+    max_p = get_max_participants(initiative)
+    if max_p and accepted_count(initiative_id) < int(max_p) \
+            and get_initiative_status(initiative) == INIT_STATUS_IN_PROGRESS:
+        set_initiative_status(initiative_id, INIT_STATUS_OPEN)
+        return True
+    return False
+
+
+def exclude_participant(initiative_id, user_id) -> bool:
+    """Remove one executor from the initiative without crediting any
+    points. If this frees a seat below the cap, automatically reopens the
+    initiative to new requests. Returns True if it was reopened."""
+    return _remove_executor(initiative_id, user_id, STATUS_EXCLUDED,
+                             excluded_at=datetime.utcnow().isoformat())
+
+
+def executors_for_initiative(initiative_id) -> list:
+    """Every participant currently ACCEPTED (chosen executor, not yet
+    marked completed) for this initiative — used for '👥 المنفذون'."""
+    return requests_for_initiative(initiative_id, statuses=(STATUS_ACCEPTED,))
 
 
 def delete_initiative(initiative_id) -> bool:
@@ -250,9 +358,14 @@ def requests_by_status(status) -> list:
     return sorted(out, key=lambda r: r.get("requested_at", ""))
 
 
-def cancel_request(initiative_id, user_id, **extra) -> None:
-    set_request_status(initiative_id, user_id, STATUS_CANCELLED,
-                        cancelled_at=datetime.utcnow().isoformat(), **extra)
+def cancel_request(initiative_id, user_id, **extra) -> bool:
+    """Cancel an accepted executor's participation (via the admin's
+    '🚫 إلغاء المبادرة' action). Same seat-freeing/reopen behavior as
+    exclude_participant() — the only difference is the resulting status
+    label ('ملغاة' vs 'مستبعد'). Returns True if this reopened the
+    initiative to new requests."""
+    return _remove_executor(initiative_id, user_id, STATUS_CANCELLED,
+                             cancelled_at=datetime.utcnow().isoformat(), **extra)
 
 
 def create_request(initiative_id, user_id, user_name: str) -> dict:

@@ -42,9 +42,10 @@ logger = logging.getLogger(__name__)
  IN_C_NAME, IN_C_DESC, IN_C_POINTS, IN_C_MAX, IN_C_VISIBLE,
  IN_EDIT_MENU, IN_E_NAME, IN_E_DESC, IN_E_POINTS, IN_E_MAX,
  IN_VIS_MENU,
+ IN_EXEC_LIST, IN_EXEC_DETAIL, IN_EXEC_DEL_CONFIRM,
  IN_RES_MENU, IN_RES_LIST, IN_RES_DETAIL,
  IN_REQ_FILTER, IN_REQ_LIST, IN_REQ_DETAIL,
- ) = range(21)
+ ) = range(24)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -160,9 +161,9 @@ def _initiative_detail_text(initiative: dict) -> str:
         f"💡 *{initiative.get('name')}*\n\n"
         f"📄 {initiative.get('description') or '—'}\n\n"
         f"🏆 عدد النقاط: *{initiative.get('points', 0)}*\n"
-        f"👥 الحد الأقصى للمقبولين: *{max_line}*\n"
-        f"✅ عدد المقبولين: *{ins.accepted_count(initiative.get('id'))}*\n"
-        f"📨 عدد الطلبات قيد الانتظار: *{pending}*\n"
+        f"👥 الحد الأقصى للمشاركين: *{max_line}*\n"
+        f"🟢 عدد المنفذين الحاليين: *{ins.accepted_count(initiative.get('id'))}*\n"
+        f"📨 عدد الطلبات: *{pending}*\n"
         f"📌 المقاعد المتبقية: *{remaining_line}*\n"
         f"👁 حالة الظهور: *{visibility}*\n"
         f"📍 حالة المبادرة: *{ins.initiative_status_label(initiative)}*\n"
@@ -174,6 +175,7 @@ def _detail_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تعديل المبادرة", callback_data="in_detail_edit")],
         [InlineKeyboardButton("👁 إظهار / إخفاء المبادرة", callback_data="in_detail_vis")],
+        [InlineKeyboardButton("👥 المنفذون", callback_data="in_detail_execs")],
         [InlineKeyboardButton("🧹 إدارة النتائج", callback_data="in_detail_results")],
         [InlineKeyboardButton("🗑 حذف المبادرة", callback_data="in_detail_delete")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")],
@@ -380,11 +382,15 @@ async def in_e_max_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initiative_id = context.user_data.get("in_initiative_id")
     ins.update_initiative_field(initiative_id, max_participants=int(text))
     initiative = ins.get_initiative(initiative_id)
-    # Raising the cap (or lowering it while seats are still free) simply lets
-    # is_full()/initiative_status_label() re-evaluate on their own next
-    # check — no extra bookkeeping needed. Existing accepted participants are
-    # never removed when the cap is lowered below the current accepted
-    # count; new acceptances are just blocked until the count drops under it.
+    # Existing executors are never removed when the cap is lowered below the
+    # current count — new acceptances are just blocked until the count drops
+    # under it. But if the cap is RAISED and that frees a seat on a locked
+    # ('in_progress') initiative, reopen it to new requests automatically —
+    # the same rule as excluding/cancelling an executor.
+    if ins.get_initiative_status(initiative) == ins.INIT_STATUS_IN_PROGRESS \
+            and ins.accepted_count(initiative_id) < int(text):
+        ins.set_initiative_status(initiative_id, ins.INIT_STATUS_OPEN)
+        initiative = ins.get_initiative(initiative_id)
     await update.message.reply_text(
         f"✅ تم تحديث الحد الأقصى.\n\nالحالة الآن: {ins.initiative_status_label(initiative)}",
         reply_markup=_edit_menu_kb(),
@@ -441,6 +447,106 @@ async def in_vis_hide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return IN_VIS_MENU
 
 
+# ── Executors ("👥 المنفذون") ────────────────────────────────────────────────
+#
+# The participants an admin has chosen to actually carry out the initiative
+# (status == accepted, not yet marked completed). An admin can exclude one
+# of them at any time; if that frees a seat below the cap on an initiative
+# that was locked ("in_progress"), it automatically reopens to new requests.
+
+def _exec_list_kb(execs: list) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(r.get("user_name", "—"), callback_data=f"in_exec_{r['user_id']}")]
+        for r in execs
+    ]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def in_detail_execs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _show_exec_list(update, context)
+
+
+async def _show_exec_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    initiative_id = context.user_data.get("in_initiative_id")
+    execs = ins.executors_for_initiative(initiative_id)
+    if not execs:
+        await _reply(
+            update, "📭 لا يوجد منفذون مختارون حالياً لهذه المبادرة.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")]]),
+        )
+        return IN_EXEC_LIST
+    await _reply(update, "👥 *المنفذون*\n\nاختر أحدهم:", _exec_list_kb(execs))
+    return IN_EXEC_LIST
+
+
+async def in_exec_back_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _show_exec_list(update, context)
+
+
+async def in_exec_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.data.replace("in_exec_", "")
+    initiative_id = context.user_data.get("in_initiative_id")
+    context.user_data["in_exec_user_id"] = user_id
+
+    r = ins.get_request(initiative_id, user_id)
+    if not r:
+        return await _show_exec_list(update, context)
+
+    text = (
+        f"👤 *{r.get('user_name', '—')}*\n"
+        f"📅 وقت القبول: {_fmt_date(r.get('decided_at'))}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 استبعاد من المبادرة", callback_data="in_exec_exclude")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_exec_back_list")],
+    ])
+    await _reply(update, text, kb)
+    return IN_EXEC_DETAIL
+
+
+async def in_exec_exclude(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    user_id       = context.user_data.get("in_exec_user_id")
+    r = ins.get_request(initiative_id, user_id)
+    if not r:
+        return await _show_exec_list(update, context)
+    await _reply(
+        update,
+        f"🚫 هل تريد استبعاد *{r.get('user_name', '—')}* من تنفيذ هذه المبادرة؟\n\n"
+        "لن يحصل على أي نقاط.",
+        _yn("in_exec_exclude_yes", "in_exec_back_list"),
+    )
+    return IN_EXEC_DEL_CONFIRM
+
+
+async def in_exec_exclude_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_initiative_id")
+    user_id       = context.user_data.get("in_exec_user_id")
+    reopened = ins.exclude_participant(initiative_id, user_id)
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id),
+            text="تم استبعادك من تنفيذ المبادرة.",
+        )
+    except Exception as e:
+        logger.warning("initiative exclude notify failed: %s", e)
+
+    note = "\n\n🟢 المبادرة أصبحت مفتوحة لاستقبال طلبات جديدة." if reopened else ""
+    await _reply(
+        update, f"✅ تم استبعاد المتسابق وإشعاره.{note}",
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")]]),
+    )
+    return IN_EXEC_LIST
+
+
 # ── Results management ("🧹 إدارة النتائج") ─────────────────────────────────
 #
 # Three categories, scoped to the CURRENT initiative only:
@@ -456,6 +562,7 @@ _RES_CATEGORIES = {
     "completed": (ins.STATUS_COMPLETED, "✔ النتائج المكتملة"),
     "rejected":  (ins.STATUS_REJECTED,  "❌ الطلبات المرفوضة"),
     "cancelled": (ins.STATUS_CANCELLED, "🚫 الطلبات الملغاة"),
+    "excluded":  (ins.STATUS_EXCLUDED,  "🚫 المستبعدون"),
 }
 
 
@@ -464,6 +571,7 @@ def _res_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✔ النتائج المكتملة", callback_data="in_res_cat_completed")],
         [InlineKeyboardButton("❌ الطلبات المرفوضة", callback_data="in_res_cat_rejected")],
         [InlineKeyboardButton("🚫 الطلبات الملغاة", callback_data="in_res_cat_cancelled")],
+        [InlineKeyboardButton("🚫 المستبعدون", callback_data="in_res_cat_excluded")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_detail")],
     ])
 
@@ -722,18 +830,17 @@ async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id       = context.user_data.get("in_req_user_id")
     initiative    = ins.get_initiative(initiative_id)
 
-    if not initiative or ins.is_full(initiative):
-        await update.callback_query.answer("⚠️ اكتمل العدد المطلوب لهذه المبادرة.", show_alert=True)
+    if not initiative or not ins.is_open_for_requests(initiative):
+        await update.callback_query.answer("⚠️ هذه المبادرة لم تعد تستقبل قرارات جديدة.", show_alert=True)
         return IN_REQ_DETAIL
 
     await update.callback_query.answer()
-    ins.set_request_status(initiative_id, user_id, ins.STATUS_ACCEPTED,
-                            decided_at=datetime.utcnow().isoformat())
+    auto_rejected = ins.accept_participant(initiative_id, user_id)
 
     try:
         await context.bot.send_message(
             chat_id=int(user_id),
-            text="🟢 تم قبول طلبك، يمكنك البدء بالتنفيذ.",
+            text="🎉 تم اختيارك لتنفيذ المبادرة.\n\nيرجى البدء في تنفيذها.",
         )
     except Exception as e:
         logger.warning("initiative accept notify failed: %s", e)
@@ -744,7 +851,19 @@ async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("achievements first_initiative check failed: %s", e)
 
-    await _reply(update, "✅ تم قبول الطلب وإشعار المتسابق.",
+    # If this filled the last seat, every other still-pending requester for
+    # this initiative was just auto-rejected — notify each of them.
+    for r in auto_rejected:
+        try:
+            await context.bot.send_message(
+                chat_id=int(r["user_id"]),
+                text="نعتذر، تم اكتمال اختيار منفذي هذه المبادرة.",
+            )
+        except Exception as e:
+            logger.warning("initiative auto-reject notify failed: %s", e)
+
+    note = f"\n\n🟡 اكتمل اختيار المنفذين ({len(auto_rejected)} طلب تم رفضه تلقائياً)." if auto_rejected else ""
+    await _reply(update, f"✅ تم قبول الطلب وإشعار المتسابق.{note}",
                  InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
     return IN_REQ_DETAIL
 
@@ -773,7 +892,7 @@ async def in_req_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     initiative_id = context.user_data.get("in_req_initiative_id")
     user_id       = context.user_data.get("in_req_user_id")
-    ins.cancel_request(initiative_id, user_id)
+    reopened = ins.cancel_request(initiative_id, user_id)
 
     try:
         await context.bot.send_message(
@@ -783,7 +902,8 @@ async def in_req_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("initiative cancel notify failed: %s", e)
 
-    await _reply(update, "✅ تم إلغاء المبادرة وإشعار المتسابق.",
+    note = "\n\n🟢 المبادرة أصبحت مفتوحة لاستقبال طلبات جديدة." if reopened else ""
+    await _reply(update, f"✅ تم إلغاء المبادرة وإشعار المتسابق.{note}",
                  InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
     return IN_REQ_DETAIL
 
@@ -795,9 +915,7 @@ async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initiative    = ins.get_initiative(initiative_id)
     points        = int(initiative.get("points", 0)) if initiative else 0
 
-    ins.set_request_status(initiative_id, user_id, ins.STATUS_COMPLETED,
-                            completed_at=datetime.utcnow().isoformat(),
-                            points_awarded=points)
+    finished_all = ins.complete_participant(initiative_id, user_id, points)
 
     user_obj  = get_user(int(user_id)) or {}
     full_name = user_obj.get("full_name") or "—"
@@ -826,7 +944,8 @@ async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("achievements initiative-completion check failed: %s", e)
 
-    await _reply(update, f"✅ تم احتساب *{points}* نقطة للمتسابق وإشعاره.",
+    note = "\n\n✔ اكتمل تنفيذ جميع منفذي هذه المبادرة." if finished_all else ""
+    await _reply(update, f"✅ تم احتساب *{points}* نقطة للمتسابق وإشعاره.{note}",
                  InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
     return IN_REQ_DETAIL
 
@@ -859,6 +978,7 @@ def build_initiatives_admin_handler() -> ConversationHandler:
             IN_DETAIL: [
                 CallbackQueryHandler(in_detail_edit,    pattern="^in_detail_edit$"),
                 CallbackQueryHandler(in_detail_vis,     pattern="^in_detail_vis$"),
+                CallbackQueryHandler(in_detail_execs,   pattern="^in_detail_execs$"),
                 CallbackQueryHandler(in_detail_results, pattern="^in_detail_results$"),
                 CallbackQueryHandler(in_detail_delete,  pattern="^in_detail_delete$"),
                 CallbackQueryHandler(in_back_to_list,   pattern="^in_back_to_list$"),
@@ -894,6 +1014,21 @@ def build_initiatives_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(in_vis_show,       pattern="^in_vis_show$"),
                 CallbackQueryHandler(in_vis_hide,       pattern="^in_vis_hide$"),
                 CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
+                hub_reentry,
+            ],
+            IN_EXEC_LIST: [
+                CallbackQueryHandler(in_exec_sel,       pattern=r"^in_exec_\w+$"),
+                CallbackQueryHandler(in_back_to_detail, pattern="^in_back_to_detail$"),
+                hub_reentry,
+            ],
+            IN_EXEC_DETAIL: [
+                CallbackQueryHandler(in_exec_exclude,   pattern="^in_exec_exclude$"),
+                CallbackQueryHandler(in_exec_back_list, pattern="^in_exec_back_list$"),
+                hub_reentry,
+            ],
+            IN_EXEC_DEL_CONFIRM: [
+                CallbackQueryHandler(in_exec_exclude_yes, pattern="^in_exec_exclude_yes$"),
+                CallbackQueryHandler(in_exec_back_list,   pattern="^in_exec_back_list$"),
                 hub_reentry,
             ],
             IN_RES_MENU: [

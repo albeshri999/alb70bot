@@ -48,18 +48,14 @@ async def handle_menu_initiatives(update: Update, context: ContextTypes.DEFAULT_
     lines = ["💡 *فرص المبادرات*\n"]
     rows = []
     for iid, item in sorted(items.items(), key=lambda kv: int(kv[0])):
-        remaining = ins.remaining_seats(item)
-        max_p     = ins.get_max_participants(item)
-        seats_line = f"👥 المقاعد المتبقية: *{remaining} من {max_p}*" if remaining is not None else ""
-        full = ins.is_full(item)
-        if full:
-            seats_line = "🔒 اكتمل العدد."
+        is_open = ins.is_open_for_requests(item)
+        status_line = ins.initiative_status_label(item)
 
         lines.append(
             f"\n*{item.get('name')}*\n"
             f"{item.get('description') or ''}\n"
-            f"🏆 النقاط: *{item.get('points', 0)}*"
-            + (f"\n{seats_line}" if seats_line else "")
+            f"🏆 النقاط: *{item.get('points', 0)}*\n"
+            f"📍 {status_line}"
         )
         my_request = ins.get_request(iid, user_id)
 
@@ -70,8 +66,9 @@ async def handle_menu_initiatives(update: Update, context: ContextTypes.DEFAULT_
             # Already has an open request on a DIFFERENT initiative — blocked.
             rows.append([InlineKeyboardButton(f"🔒 لديك مبادرة أخرى نشطة — {item.get('name')}",
                                                 callback_data="in_noop")])
-        elif full:
-            rows.append([InlineKeyboardButton(f"🔒 اكتمل العدد — {item.get('name')}", callback_data="in_noop")])
+        elif not is_open:
+            rows.append([InlineKeyboardButton(f"⚠️ اكتمل العدد المطلوب — {item.get('name')}",
+                                                callback_data="in_noop")])
         else:
             rows.append([InlineKeyboardButton(f"✅ طلب التنفيذ — {item.get('name')}",
                                                 callback_data=f"in_req_{iid}")])
@@ -90,7 +87,7 @@ async def handle_initiative_request(update: Update, context: ContextTypes.DEFAUL
         await query.answer("⚠️ هذه المبادرة غير متاحة.", show_alert=True)
         return
 
-    if ins.is_full(initiative):
+    if not ins.is_open_for_requests(initiative):
         await query.answer("⚠️ اكتمل العدد المطلوب لهذه المبادرة.", show_alert=True)
         return
 
