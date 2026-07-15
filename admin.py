@@ -12,7 +12,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from storage import (load_users, load_days, save_days, update_user, load_codes, save_codes,
-                     get_hint_cost, set_hint_cost, load_credit_log, log_credit_action)
+                     load_credit_log, log_credit_action)
 from credits import generate_codes, add_credits, get_balance, normalize_code
 import admins_store
 from utils import default_question, stage_ordinal
@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 # ── States ────────────────────────────────────────────────────────────────────
 (MAIN,
+ # New top-level submenus (pure UI reorganization — same underlying handlers)
+ PART_STATS_MENU, COMPETITIONS_MENU, BALANCE_MENU,
  # Add new day
  ADD_NAME, ADD_STAGE_Q, ADD_STAGE_A, ADD_FINAL, ADD_LOCKOUT,
  # Day management hub
@@ -39,8 +41,6 @@ logger = logging.getLogger(__name__)
  BROADCAST_MSG, BROADCAST_CONFIRM,
  # Code management
  CODE_MANAGE, CODE_COUNT, CODE_POINTS,
- # Settings
- SETTINGS, HINT_COST_VAL,
  # Credit management
  CREDIT_SEARCH, CREDIT_USER_SEL, CREDIT_USER_MENU,
  CREDIT_ADD, CREDIT_REMOVE, CREDIT_REMOVE_REASON, CREDIT_RESET_CONFIRM,
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
  NOTIF_MENU,
  # Competition days open/closed status manager
  DAYS_TOGGLE_LIST, DAYS_TOGGLE_DAY,
- ) = range(49)
+ ) = range(50)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -93,35 +93,89 @@ def _main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
     if not is_owner:
         # Restricted admin — only these six sections are visible/reachable.
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 المشاركون",            callback_data="adm_participants")],
-            [InlineKeyboardButton("📊 الإحصائيات",           callback_data="adm_stats")],
-            [InlineKeyboardButton("📝 إدارة الاختبارات",     callback_data="adm_quizzes")],
-            [InlineKeyboardButton("👥 اختبار توزيع الفرق",   callback_data="adm_distro")],
-            [InlineKeyboardButton("📢 إذاعة رسالة",          callback_data="adm_broadcast")],
-            [InlineKeyboardButton("💰 إدارة أرصدة المشاركين", callback_data="adm_credit")],
-            [InlineKeyboardButton("🏆 إعدادات لوحة الشرف",   callback_data="adm_leaderboard")],
+            [InlineKeyboardButton("📊 المشاركون والإحصائيات", callback_data="adm_participants_stats")],
+            [InlineKeyboardButton("📝 إدارة الاختبارات",       callback_data="adm_quizzes")],
+            [InlineKeyboardButton("👥 اختبار توزيع الفرق",     callback_data="adm_distro")],
+            [InlineKeyboardButton("💰 إدارة الأرصدة",          callback_data="adm_balance_menu")],
+            [InlineKeyboardButton("📢 الإذاعة",                callback_data="adm_broadcast")],
+            [InlineKeyboardButton("🏆 لوحة الشرف",             callback_data="adm_leaderboard")],
         ])
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 المشاركون",           callback_data="adm_participants"),
-         InlineKeyboardButton("🏆 النتائج",              callback_data="adm_results")],
-        [InlineKeyboardButton("📊 الإحصائيات",           callback_data="adm_stats"),
-         InlineKeyboardButton("📤 تصدير Excel",          callback_data="adm_export")],
+        [InlineKeyboardButton("📊 المشاركون والإحصائيات", callback_data="adm_participants_stats")],
+        [InlineKeyboardButton("📝 إدارة الاختبارات",       callback_data="adm_quizzes")],
+        [InlineKeyboardButton("👥 اختبار توزيع الفرق",     callback_data="adm_distro")],
+        [InlineKeyboardButton("🏆 إدارة المسابقات",        callback_data="adm_competitions_menu")],
+        [InlineKeyboardButton("💰 إدارة الأرصدة",          callback_data="adm_balance_menu")],
+        [InlineKeyboardButton("📢 الإذاعة",                callback_data="adm_broadcast")],
+        [InlineKeyboardButton("🏆 لوحة الشرف",             callback_data="adm_leaderboard")],
+        [InlineKeyboardButton("👮 إعدادات المشرفين",       callback_data="adm_admins")],
+    ])
+
+
+# ── New top-level submenus (pure reorganization — each button below calls the
+# exact same existing handler function as before; nothing about what these
+# handlers DO has changed, only where their entry button lives) ─────────────
+
+def _participants_stats_kb(is_owner: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("👥 المشاركون", callback_data="adm_participants")]]
+    if is_owner:
+        rows.append([InlineKeyboardButton("🏆 النتائج", callback_data="adm_results")])
+    rows.append([InlineKeyboardButton("📈 الإحصائيات", callback_data="adm_stats")])
+    if is_owner:
+        rows.append([InlineKeyboardButton("📥 تصدير Excel", callback_data="adm_export")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_participants_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(
+        update, "📊 *المشاركون والإحصائيات*\n\nاختر العملية:",
+        _participants_stats_kb(admins_store.is_owner(update.effective_user.id)),
+    )
+    return PART_STATS_MENU
+
+
+def _competitions_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("📅 إدارة المسابقات",      callback_data="adm_manage_days")],
-        [InlineKeyboardButton("📝 إدارة الاختبارات",     callback_data="adm_quizzes")],
-        [InlineKeyboardButton("👥 اختبار توزيع الفرق",   callback_data="adm_distro")],
         [InlineKeyboardButton("📅 إدارة أيام المسابقة",  callback_data="adm_days_toggle")],
-        [InlineKeyboardButton("➕ إضافة يوم جديد",      callback_data="adm_add_day"),
+        [InlineKeyboardButton("➕ إضافة يوم",            callback_data="adm_add_day"),
          InlineKeyboardButton("🗑 حذف يوم",              callback_data="adm_delete_day")],
         [InlineKeyboardButton("🔔 إشعارات فتح الكلمات",  callback_data="adm_notif_toggle")],
-        [InlineKeyboardButton("🔄 إعادة تعيين النتائج", callback_data="adm_reset")],
-        [InlineKeyboardButton("📢 إذاعة رسالة",          callback_data="adm_broadcast")],
-        [InlineKeyboardButton("💳 إدارة أكواد الشحن",    callback_data="adm_codes")],
-        [InlineKeyboardButton("💳 إدارة أرصدة المشاركين", callback_data="adm_credit")],
-        [InlineKeyboardButton("📜 سجل حركة الرصيد",      callback_data="adm_tlog")],
-        [InlineKeyboardButton("🏆 إعدادات لوحة الشرف",   callback_data="adm_leaderboard")],
-        [InlineKeyboardButton("⚙️ الإعدادات",             callback_data="adm_settings")],
-        [InlineKeyboardButton("⚙️ إعدادات المشرفين",      callback_data="adm_admins")],
+        [InlineKeyboardButton("🔄 إعادة تعيين النتائج",  callback_data="adm_reset")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")],
     ])
+
+
+async def cb_competitions_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admins_store.is_owner(update.effective_user.id):
+        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
+        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
+        return MAIN
+    await update.callback_query.answer()
+    await _reply(update, "🏆 *إدارة المسابقات*\n\nاختر العملية:", _competitions_kb())
+    return COMPETITIONS_MENU
+
+
+def _balance_kb(is_owner: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if is_owner:
+        rows.append([InlineKeyboardButton("💳 إدارة أكواد الشحن", callback_data="adm_codes")])
+    rows.append([InlineKeyboardButton("💰 إدارة أرصدة المشاركين", callback_data="adm_credit")])
+    if is_owner:
+        rows.append([InlineKeyboardButton("📜 سجل حركة الرصيد", callback_data="adm_tlog")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="adm_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(
+        update, "💰 *إدارة الأرصدة*\n\nاختر العملية:",
+        _balance_kb(admins_store.is_owner(update.effective_user.id)),
+    )
+    return BALANCE_MENU
 
 
 def _back_kb() -> InlineKeyboardMarkup:
@@ -2027,61 +2081,6 @@ async def tlog_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     return TRANS_LOG
 
 
-# ── Settings ──────────────────────────────────────────────────────────────────
-
-def _settings_kb() -> InlineKeyboardMarkup:
-    cost = get_hint_cost()
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💡 تكلفة كشف الحرف  ({cost} نقطة حالياً)",
-                              callback_data="settings_hint_cost")],
-        [InlineKeyboardButton("⬅️ القائمة الرئيسية", callback_data="adm_main")],
-    ])
-
-
-async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admins_store.is_owner(update.effective_user.id):
-        await update.callback_query.answer("⛔ هذا الخيار متاح فقط لمالك البوت.", show_alert=True)
-        await _reply(update, "⚙️ *لوحة تحكم المشرف*", _main_kb(False))
-        return MAIN
-    await update.callback_query.answer()
-    cost = get_hint_cost()
-    await _reply(update,
-        f"⚙️ *الإعدادات*\n\n💡 تكلفة كشف الحرف الحالية: *{cost} نقطة*",
-        _settings_kb(),
-    )
-    return SETTINGS
-
-
-async def cb_set_hint_cost(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    cost = get_hint_cost()
-    await _reply(update,
-        f"💡 *تكلفة كشف الحرف*\n\nالقيمة الحالية: *{cost} نقطة*\n\n"
-        f"أدخل التكلفة الجديدة بالنقاط (رقم صحيح أكبر من صفر):",
-        InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬅️ رجوع", callback_data="adm_settings")
-        ]])
-    )
-    return HINT_COST_VAL
-
-
-async def hint_cost_val_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        cost = int(update.message.text.strip())
-        if cost <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("⚠️ أدخل رقماً صحيحاً أكبر من صفر.")
-        return HINT_COST_VAL
-    set_hint_cost(cost)
-    await update.message.reply_text(
-        f"✅ تم تغيير تكلفة كشف الحرف إلى *{cost} نقطة* وسيُطبَّق فوراً على جميع المسابقات.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_settings_kb(),
-    )
-    return SETTINGS
-
-
 # ── Leaderboard settings ──────────────────────────────────────────────────────
 
 def _lb_kb() -> InlineKeyboardMarkup:
@@ -2342,22 +2341,40 @@ def build_admin_handler() -> ConversationHandler:
         states={
             MAIN: [
                 back,
-                CallbackQueryHandler(cb_participants,  pattern="^adm_participants$"),
-                CallbackQueryHandler(cb_results,       pattern="^adm_results$"),
-                CallbackQueryHandler(cb_stats,         pattern="^adm_stats$"),
-                CallbackQueryHandler(cb_export,        pattern="^adm_export$"),
-                CallbackQueryHandler(cb_manage_days,   pattern="^adm_manage_days$"),
-                CallbackQueryHandler(cb_add_day,       pattern="^adm_add_day$"),
-                CallbackQueryHandler(cb_delete_day,    pattern="^adm_delete_day$"),
-                CallbackQueryHandler(cb_reset,         pattern="^adm_reset$"),
+                CallbackQueryHandler(cb_participants_stats_menu, pattern="^adm_participants_stats$"),
+                CallbackQueryHandler(cb_competitions_menu,        pattern="^adm_competitions_menu$"),
+                CallbackQueryHandler(cb_balance_menu,             pattern="^adm_balance_menu$"),
                 CallbackQueryHandler(cb_broadcast,     pattern="^adm_broadcast$"),
+                CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
+                # NOTE: adm_quizzes / adm_distro / adm_admins are intentionally
+                # NOT handled here — they fall through untouched to their own
+                # independent ConversationHandlers (quiz_admin.py / distro_admin.py
+                # / admin_settings.py), exactly as before this reorganization.
+            ],
+            # ── Participants & stats submenu ("📊 المشاركون والإحصائيات")
+            PART_STATS_MENU: [
+                CallbackQueryHandler(cb_participants, pattern="^adm_participants$"),
+                CallbackQueryHandler(cb_results,      pattern="^adm_results$"),
+                CallbackQueryHandler(cb_stats,        pattern="^adm_stats$"),
+                CallbackQueryHandler(cb_export,       pattern="^adm_export$"),
+                back,
+            ],
+            # ── Competition management submenu ("🏆 إدارة المسابقات")
+            COMPETITIONS_MENU: [
+                CallbackQueryHandler(cb_manage_days,      pattern="^adm_manage_days$"),
+                CallbackQueryHandler(cb_days_toggle_list, pattern="^adm_days_toggle$"),
+                CallbackQueryHandler(cb_add_day,          pattern="^adm_add_day$"),
+                CallbackQueryHandler(cb_delete_day,       pattern="^adm_delete_day$"),
+                CallbackQueryHandler(cb_notif_menu,       pattern="^adm_notif_toggle$"),
+                CallbackQueryHandler(cb_reset,            pattern="^adm_reset$"),
+                back,
+            ],
+            # ── Balance management submenu ("💰 إدارة الأرصدة")
+            BALANCE_MENU: [
                 CallbackQueryHandler(cb_codes,         pattern="^adm_codes$"),
-                CallbackQueryHandler(cb_settings,      pattern="^adm_settings$"),
                 CallbackQueryHandler(cb_credit_manage, pattern="^adm_credit$"),
                 CallbackQueryHandler(cb_tlog_main,     pattern="^adm_tlog$"),
-                CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
-                CallbackQueryHandler(cb_notif_menu,       pattern="^adm_notif_toggle$"),
-                CallbackQueryHandler(cb_days_toggle_list, pattern="^adm_days_toggle$"),
+                back,
             ],
             # ── Word-open notifications toggle
             NOTIF_MENU: [
@@ -2519,17 +2536,6 @@ def build_admin_handler() -> ConversationHandler:
             CODE_POINTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, codes_points_handler),
                 CallbackQueryHandler(cb_codes, pattern="^adm_codes$"),
-                back,
-            ],
-            # ── Settings
-            SETTINGS: [
-                CallbackQueryHandler(cb_set_hint_cost, pattern="^settings_hint_cost$"),
-                CallbackQueryHandler(cb_settings,      pattern="^adm_settings$"),
-                back,
-            ],
-            HINT_COST_VAL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, hint_cost_val_handler),
-                CallbackQueryHandler(cb_settings, pattern="^adm_settings$"),
                 back,
             ],
             # ── Credit management
