@@ -78,7 +78,8 @@ def next_initiative_id() -> str:
     return str((max(nums) + 1) if nums else 1)
 
 
-def create_initiative(name: str, description: str, points: int, visible: bool) -> str:
+def create_initiative(name: str, description: str, points: int, visible: bool,
+                       max_participants: int) -> str:
     initiative_id = next_initiative_id()
     save_initiative(initiative_id, {
         "id": initiative_id,
@@ -86,6 +87,11 @@ def create_initiative(name: str, description: str, points: int, visible: bool) -
         "description": description or "",
         "points": int(points),
         "visible": bool(visible),
+        # Maximum number of ACCEPTED participants this initiative can hold.
+        # None means unlimited — this is also the default for initiatives
+        # created before this feature existed, so they keep working exactly
+        # as before (never auto-locking).
+        "max_participants": int(max_participants) if max_participants else None,
         "created_at": datetime.utcnow().isoformat(),
     })
     return initiative_id
@@ -100,6 +106,47 @@ def update_initiative_field(initiative_id, **fields) -> None:
 
 def set_initiative_visible(initiative_id, visible: bool) -> None:
     update_initiative_field(initiative_id, visible=bool(visible))
+
+
+def get_max_participants(initiative: dict):
+    """None means unlimited (covers initiatives created before this field existed)."""
+    return initiative.get("max_participants")
+
+
+def accepted_count(initiative_id) -> int:
+    """How many participants currently hold an ACCEPTED slot on this
+    initiative. Completed requests still occupy their slot (they were
+    accepted at some point and the seat was used), but rejected/cancelled
+    requests never did (or no longer do) — this reflects real accepted
+    participants, not just raw request counts, per the requirement that the
+    initiative must only auto-lock once truly-accepted seats run out."""
+    key = str(initiative_id)
+    return sum(
+        1 for r in load_requests()
+        if str(r.get("initiative_id")) == key and r.get("status") in (STATUS_ACCEPTED, STATUS_COMPLETED)
+    )
+
+
+def is_full(initiative: dict) -> bool:
+    max_p = get_max_participants(initiative)
+    if not max_p:
+        return False
+    return accepted_count(initiative.get("id")) >= int(max_p)
+
+
+def remaining_seats(initiative: dict):
+    """None if unlimited, otherwise how many accepted-slots are still free
+    (never negative)."""
+    max_p = get_max_participants(initiative)
+    if not max_p:
+        return None
+    return max(0, int(max_p) - accepted_count(initiative.get("id")))
+
+
+def capacity_status_label(initiative: dict) -> str:
+    """🟢 مفتوحة / 🔒 اكتمل العدد — purely about accepted-seat capacity,
+    independent of the initiative's visible/hidden toggle."""
+    return "🔒 اكتمل العدد" if is_full(initiative) else "🟢 مفتوحة"
 
 
 def delete_initiative(initiative_id) -> bool:

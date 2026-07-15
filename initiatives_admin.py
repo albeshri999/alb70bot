@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 # ── States ────────────────────────────────────────────────────────────────────
 (IN_HUB, IN_LIST, IN_ITEM_MENU, IN_DEL_CONFIRM,
- IN_C_NAME, IN_C_DESC, IN_C_POINTS, IN_C_VISIBLE,
- IN_EDIT_MENU, IN_E_NAME, IN_E_DESC, IN_E_POINTS,
+ IN_C_NAME, IN_C_DESC, IN_C_POINTS, IN_C_MAX, IN_C_VISIBLE,
+ IN_EDIT_MENU, IN_E_NAME, IN_E_DESC, IN_E_POINTS, IN_E_MAX,
  IN_REQ_FILTER, IN_REQ_LIST, IN_REQ_DETAIL,
- ) = range(15)
+ ) = range(17)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -126,15 +126,22 @@ async def in_list_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _initiative_summary(initiative: dict) -> str:
-    status = "👁 ظاهرة" if initiative.get("visible") else "🙈 مخفية"
+    visibility = "👁 ظاهرة" if initiative.get("visible") else "🙈 مخفية"
     requests = ins.requests_for_initiative(initiative.get("id"))
     completed = sum(1 for r in requests if r.get("status") == ins.STATUS_COMPLETED)
+    pending   = sum(1 for r in requests if r.get("status") == ins.STATUS_PENDING)
+    max_p     = ins.get_max_participants(initiative)
+    max_line  = str(max_p) if max_p else "بدون حد أقصى"
     return (
         f"💡 *{initiative.get('name')}*\n\n"
         f"{initiative.get('description') or '—'}\n\n"
         f"🏆 النقاط: *{initiative.get('points', 0)}*\n"
-        f"الحالة: *{status}*\n"
-        f"👥 عدد الطلبات: *{len(requests)}*  —  ✔️ منفَّذة: *{completed}*"
+        f"👥 الحد الأقصى: *{max_line}*\n"
+        f"✅ المقبولون: *{ins.accepted_count(initiative.get('id'))}*\n"
+        f"📨 الطلبات قيد الانتظار: *{pending}*\n"
+        f"الحالة: *{ins.capacity_status_label(initiative)}*\n"
+        f"الظهور: *{visibility}*\n"
+        f"📋 عدد الطلبات: *{len(requests)}*  —  ✔️ منفَّذة: *{completed}*"
     )
 
 
@@ -220,6 +227,16 @@ async def in_c_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ الرجاء إدخال رقم صحيح أكبر من صفر.")
         return IN_C_POINTS
     context.user_data["in_new"]["points"] = int(text)
+    await update.message.reply_text("👥 كم العدد الأقصى للمقبولين في هذه المبادرة؟\n\nمثال: 1 أو 3 أو 5 أو 10")
+    return IN_C_MAX
+
+
+async def in_c_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) < 1:
+        await update.message.reply_text("⚠️ الرجاء إدخال رقم صحيح أكبر من أو يساوي 1.")
+        return IN_C_MAX
+    context.user_data["in_new"]["max_participants"] = int(text)
     await update.message.reply_text(
         "👁 هل المبادرة ظاهرة للمتسابقين؟",
         reply_markup=_yn("in_vis_yes", "in_vis_no"),
@@ -234,6 +251,7 @@ async def _finish_create(update: Update, context: ContextTypes.DEFAULT_TYPE, vis
         description=data.get("description", ""),
         points=data.get("points", 0),
         visible=visible,
+        max_participants=data.get("max_participants"),
     )
     context.user_data.pop("in_new", None)
     await _reply(update, "✅ تم إنشاء المبادرة بنجاح.", _hub_kb())
@@ -257,6 +275,7 @@ def _edit_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📝 اسم المبادرة", callback_data="in_e_name")],
         [InlineKeyboardButton("🗒 الوصف", callback_data="in_e_desc")],
         [InlineKeyboardButton("🔢 عدد النقاط", callback_data="in_e_points")],
+        [InlineKeyboardButton("👥 تعديل الحد الأقصى للمقبولين", callback_data="in_e_max")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")],
     ])
 
@@ -304,6 +323,31 @@ async def in_e_points_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return IN_E_POINTS
     ins.update_initiative_field(context.user_data.get("in_initiative_id"), points=int(text))
     await update.message.reply_text("✅ تم تحديث النقاط.", reply_markup=_edit_menu_kb())
+    return IN_EDIT_MENU
+
+
+async def in_e_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await _reply(update, "👥 أرسل الحد الأقصى الجديد للمقبولين في هذه المبادرة:")
+    return IN_E_MAX
+
+
+async def in_e_max_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) < 1:
+        await update.message.reply_text("⚠️ الرجاء إدخال رقم صحيح أكبر من أو يساوي 1.")
+        return IN_E_MAX
+    initiative_id = context.user_data.get("in_initiative_id")
+    ins.update_initiative_field(initiative_id, max_participants=int(text))
+    initiative = ins.get_initiative(initiative_id)
+    # Raising the cap (or lowering it while seats are still free) simply
+    # lets is_full() re-evaluate to False on its own next check — no extra
+    # bookkeeping needed here. Existing accepted participants are never
+    # removed when the cap is lowered below the current accepted count;
+    # new acceptances are just blocked until the count drops under the cap.
+    note = "🔒 اكتمل العدد" if ins.is_full(initiative) else "🟢 المبادرة مفتوحة لاستقبال طلبات جديدة"
+    await update.message.reply_text(f"✅ تم تحديث الحد الأقصى.\n\nالحالة الآن: {note}",
+                                     reply_markup=_edit_menu_kb())
     return IN_EDIT_MENU
 
 
@@ -421,9 +465,15 @@ async def in_req_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
     initiative_id = context.user_data.get("in_req_initiative_id")
     user_id       = context.user_data.get("in_req_user_id")
+    initiative    = ins.get_initiative(initiative_id)
+
+    if not initiative or ins.is_full(initiative):
+        await update.callback_query.answer("⚠️ اكتمل العدد المطلوب لهذه المبادرة.", show_alert=True)
+        return IN_REQ_DETAIL
+
+    await update.callback_query.answer()
     ins.set_request_status(initiative_id, user_id, ins.STATUS_ACCEPTED,
                             decided_at=datetime.utcnow().isoformat())
 
@@ -560,6 +610,7 @@ def build_initiatives_admin_handler() -> ConversationHandler:
             IN_C_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_name), hub_reentry],
             IN_C_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_desc), hub_reentry],
             IN_C_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_points), hub_reentry],
+            IN_C_MAX:    [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_max), hub_reentry],
             IN_C_VISIBLE: [
                 CallbackQueryHandler(in_vis_yes, pattern="^in_vis_yes$"),
                 CallbackQueryHandler(in_vis_no,  pattern="^in_vis_no$"),
@@ -569,11 +620,13 @@ def build_initiatives_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(in_e_name,   pattern="^in_e_name$"),
                 CallbackQueryHandler(in_e_desc,   pattern="^in_e_desc$"),
                 CallbackQueryHandler(in_e_points, pattern="^in_e_points$"),
+                CallbackQueryHandler(in_e_max,    pattern="^in_e_max$"),
                 hub_reentry,
             ],
             IN_E_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_name_val), hub_reentry],
             IN_E_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_desc_val), hub_reentry],
             IN_E_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_points_val), hub_reentry],
+            IN_E_MAX:    [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_max_val), hub_reentry],
             IN_REQ_FILTER: [
                 CallbackQueryHandler(in_req_filter_sel, pattern=r"^in_reqf_\w+$"),
                 hub_reentry,
