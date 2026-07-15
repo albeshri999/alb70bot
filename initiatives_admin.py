@@ -112,7 +112,10 @@ async def in_list_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data.replace("in_list_", "")  # view | edit | delete | toggle
     context.user_data["in_action"] = action
+    return await _show_list(update, context)
 
+
+async def _show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = ins.load_initiatives()
     if not items:
         await _reply(
@@ -123,6 +126,14 @@ async def in_list_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await _reply(update, "📋 *قائمة المبادرات*\n\nاختر مبادرة:", _list_kb())
     return IN_LIST
+
+
+async def in_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generic 'رجوع' target for any screen reached from the initiatives
+    list (view / toggle / edit / delete-confirm) — always returns to that
+    same list, never straight to the hub."""
+    await update.callback_query.answer()
+    return await _show_list(update, context)
 
 
 def _initiative_summary(initiative: dict) -> str:
@@ -158,25 +169,25 @@ async def in_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "view":
         await _reply(
             update, _initiative_summary(initiative),
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")]]),
         )
-        return IN_HUB
+        return IN_LIST
 
     if action == "toggle":
         ins.set_initiative_visible(initiative_id, not initiative.get("visible"))
         initiative = ins.get_initiative(initiative_id)
         await _reply(
             update, "✅ تم التحديث.\n\n" + _initiative_summary(initiative),
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")]]),
         )
-        return IN_HUB
+        return IN_LIST
 
     if action == "delete":
         await _reply(
             update,
             f"🗑 هل تريد حذف مبادرة *{initiative.get('name')}*؟\n\n"
             "سيتم حذف جميع طلباتها أيضاً.",
-            _yn("in_delete_yes", "in_hub"),
+            _yn("in_delete_yes", "in_back_to_list"),
         )
         return IN_DEL_CONFIRM
 
@@ -188,11 +199,10 @@ async def in_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def in_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
     initiative_id = context.user_data.get("in_initiative_id")
     ins.delete_initiative(initiative_id)
-    await _reply(update, "✅ تم حذف المبادرة.", _hub_kb())
-    return IN_HUB
+    await update.callback_query.answer("✅ تم حذف المبادرة.")
+    return await _show_list(update, context)
 
 
 # ── Create new initiative ─────────────────────────────────────────────────────
@@ -276,7 +286,7 @@ def _edit_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗒 الوصف", callback_data="in_e_desc")],
         [InlineKeyboardButton("🔢 عدد النقاط", callback_data="in_e_points")],
         [InlineKeyboardButton("👥 تعديل الحد الأقصى للمقبولين", callback_data="in_e_max")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="in_back_to_list")],
     ])
 
 
@@ -601,10 +611,12 @@ def build_initiatives_admin_handler() -> ConversationHandler:
             ],
             IN_LIST: [
                 CallbackQueryHandler(in_pick, pattern=r"^in_pick_\w+$"),
+                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
                 list_entry, hub_reentry,
             ],
             IN_DEL_CONFIRM: [
                 CallbackQueryHandler(in_delete_yes, pattern="^in_delete_yes$"),
+                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
                 hub_reentry,
             ],
             IN_C_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_c_name), hub_reentry],
@@ -621,6 +633,7 @@ def build_initiatives_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(in_e_desc,   pattern="^in_e_desc$"),
                 CallbackQueryHandler(in_e_points, pattern="^in_e_points$"),
                 CallbackQueryHandler(in_e_max,    pattern="^in_e_max$"),
+                CallbackQueryHandler(in_back_to_list, pattern="^in_back_to_list$"),
                 hub_reentry,
             ],
             IN_E_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_name_val), hub_reentry],
