@@ -139,7 +139,7 @@ async def _timer_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.edit_message_text(
             chat_id=data["chat_id"], message_id=data["message_id"],
             text=_question_text(quiz, sq, index, remaining),
-            parse_mode=ParseMode.MARKDOWN, reply_markup=_question_kb(),
+            parse_mode=ParseMode.MARKDOWN, reply_markup=_question_kb(sq),
         )
     except Exception as e:
         logger.debug("quiz timer tick edit skipped: %s", e)
@@ -219,22 +219,26 @@ async def handle_quiz_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _edit(update, "\n".join(lines), kb)
 
 
-def _question_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("أ", callback_data="qz_ans_a"),
-        InlineKeyboardButton("ب", callback_data="qz_ans_b"),
-    ]])
+def _question_kb(sq: dict) -> InlineKeyboardMarkup:
+    options = sq.get("options", [])
+    buttons = [
+        InlineKeyboardButton(qs.letter_for(i), callback_data=f"qz_ans_{i}")
+        for i in range(len(options))
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(rows)
 
 
 def _question_text(quiz: dict, sq: dict, index: int, remaining=None) -> str:
     n = len(quiz["questions"])
     header = f"⏳ الوقت المتبقي:\n*{_fmt_timer(remaining)}*\n\n" if remaining is not None else ""
+    options = sq.get("options", [])
+    opt_lines = "\n".join(f"{qs.letter_for(i)}) {opt}" for i, opt in enumerate(options))
     return (
         f"{header}"
         f"📝 *{quiz.get('name')}*  —  السؤال {index + 1}/{n}\n\n"
         f"{sq.get('question', '')}\n\n"
-        f"أ) {sq.get('option_a', '')}\n"
-        f"ب) {sq.get('option_b', '')}"
+        f"{opt_lines}"
     )
 
 
@@ -260,7 +264,7 @@ async def handle_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     session = qs.start_session(user_id, quiz_id)
     sq = qs.get_shuffled_question(quiz, session, 0)
-    await _edit(update, _question_text(quiz, sq, 0, remaining), _question_kb())
+    await _edit(update, _question_text(quiz, sq, 0, remaining), _question_kb(sq))
 
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)
@@ -289,12 +293,13 @@ def _build_results_blocks(quiz: dict, score: int, total_points: int, correct_cou
     for i, r in enumerate(review, 1):
         chosen  = r.get("chosen")
         correct = r.get("correct")
-        chosen_text  = r.get("option_a") if chosen == "a" else r.get("option_b")
-        correct_text = r.get("option_a") if correct == "a" else r.get("option_b")
+        options = r.get("options", [])
+        chosen_text  = options[chosen] if isinstance(chosen, int) and chosen < len(options) else None
+        correct_text = options[correct] if isinstance(correct, int) and correct < len(options) else None
+        opt_lines = [f"{qs.letter_for(j)}) {opt}" for j, opt in enumerate(options)]
         lines = [
             f"*السؤال {i}:* {r.get('question', '')}",
-            f"أ) {r.get('option_a', '')}",
-            f"ب) {r.get('option_b', '')}",
+            *opt_lines,
             "",
         ]
         if chosen == correct:
@@ -367,8 +372,7 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
             continue
         review.append({
             "question": sq["question"],
-            "option_a": sq["option_a"],
-            "option_b": sq["option_b"],
+            "options":  sq["options"],
             "chosen":   answers[pos] if pos < len(answers) else None,
             "correct":  sq["correct"],
         })
@@ -389,6 +393,12 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "review":      review,
     })
     qs.end_session(user_id)
+
+    try:
+        import achievements_storage as ach
+        ach.recompute_quiz_speed_badges(quiz_id)
+    except Exception as e:
+        logger.warning("achievements recompute failed: %s", e)
 
     if qs.is_results_visible(quiz):
         blocks = _build_results_blocks(
@@ -414,7 +424,7 @@ async def _expire_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
 async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query   = update.callback_query
     user_id = query.from_user.id
-    choice  = query.data.replace("qz_ans_", "")  # "a" or "b"
+    choice  = int(query.data.replace("qz_ans_", ""))  # 0-based option index
 
     session = qs.get_session(user_id)
     if not session:
@@ -460,6 +470,6 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     sq_next = qs.get_shuffled_question(quiz, session, next_index)
-    await _edit(update, _question_text(quiz, sq_next, next_index, remaining), _question_kb())
+    await _edit(update, _question_text(quiz, sq_next, next_index, remaining), _question_kb(sq_next))
     if remaining is not None:
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)

@@ -24,6 +24,11 @@ from distro_admin import build_distro_admin_handler
 from distro_user import (
     handle_menu_distro, handle_distro_view, handle_distro_start, handle_distro_answer,
 )
+from initiatives_admin import build_initiatives_admin_handler
+from initiatives_user import (
+    handle_menu_initiatives, handle_initiative_request, handle_initiative_noop,
+)
+from achievements_user import handle_menu_achievements
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -58,6 +63,9 @@ def main() -> None:
     # (👥 اختبار توزيع الفرق). No points/leaderboard interaction whatsoever.
     app.add_handler(build_distro_admin_handler())
 
+    # Initiatives — fully independent ConversationHandler (💡 إدارة المبادرات)
+    app.add_handler(build_initiatives_admin_handler())
+
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("participants", participants))
@@ -78,14 +86,22 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_quizzes, pattern="^menu_quizzes$"))
     app.add_handler(CallbackQueryHandler(handle_quiz_view,    pattern=r"^qz_view_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_quiz_start,   pattern=r"^qz_start_\w+$"))
-    app.add_handler(CallbackQueryHandler(handle_quiz_answer,  pattern=r"^qz_ans_(a|b)$"))
+    app.add_handler(CallbackQueryHandler(handle_quiz_answer,  pattern=r"^qz_ans_\d$"))
 
     # Team-Distribution Test — participant-facing (👥 اختبار تنظيمي), fully
     # independent of the quiz system above and never touches credits/leaderboard.
     app.add_handler(CallbackQueryHandler(handle_menu_distro,   pattern="^menu_distro$"))
     app.add_handler(CallbackQueryHandler(handle_distro_view,   pattern=r"^dz_view_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_distro_start,  pattern=r"^dz_start_\w+$"))
-    app.add_handler(CallbackQueryHandler(handle_distro_answer, pattern=r"^dz_ans_(a|b)$"))
+    app.add_handler(CallbackQueryHandler(handle_distro_answer, pattern=r"^dz_ans_\d$"))
+
+    # Initiatives — participant-facing (💡 فرص المبادرات), fully independent
+    app.add_handler(CallbackQueryHandler(handle_menu_initiatives,   pattern="^menu_initiatives$"))
+    app.add_handler(CallbackQueryHandler(handle_initiative_request, pattern=r"^in_req_\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_initiative_noop,    pattern="^in_noop$"))
+
+    # Achievements — participant-facing (🏅 إنجازاتي), fully independent
+    app.add_handler(CallbackQueryHandler(handle_menu_achievements, pattern="^menu_achievements$"))
 
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))

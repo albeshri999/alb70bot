@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # ── States ────────────────────────────────────────────────────────────────────
 (QA_HUB, QA_LIST, QA_QUIZ_MENU, QA_DEL_CONFIRM,
  QA_C_NAME, QA_C_DESC, QA_C_POINTS, QA_C_TIMED, QA_C_MINUTES, QA_C_VISIBLE,
- QA_C_Q_TEXT, QA_C_Q_OPT_A, QA_C_Q_OPT_B, QA_C_Q_CORRECT, QA_C_Q_MORE,
+ QA_C_Q_TEXT, QA_C_Q_COUNT, QA_C_Q_OPT, QA_C_Q_CORRECT, QA_C_Q_MORE,
  QA_EDIT_MENU, QA_E_NAME, QA_E_DESC, QA_E_POINTS, QA_E_TIMED, QA_E_MINUTES,
  QA_E_Q_LIST, QA_E_Q_FIELD_MENU, QA_E_Q_FIELD_VAL, QA_E_Q_DEL_CONFIRM,
  QA_RESULTS_VIS,
@@ -674,35 +674,61 @@ async def qa_q_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ الرجاء إدخال نص السؤال.")
         return QA_C_Q_TEXT
     context.user_data["qa_new_q"] = {"question": text}
-    await update.message.reply_text("أ) أرسل *نص الخيار الأول*:")
-    return QA_C_Q_OPT_A
-
-
-async def qa_q_opt_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    context.user_data["qa_new_q"]["option_a"] = text
-    await update.message.reply_text("ب) أرسل *نص الخيار الثاني*:")
-    return QA_C_Q_OPT_B
-
-
-async def qa_q_opt_b(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    context.user_data["qa_new_q"]["option_b"] = text
-    q = context.user_data["qa_new_q"]
     await update.message.reply_text(
-        f"اختر *الإجابة الصحيحة*:\n\nأ) {q['option_a']}\nب) {q['option_b']}",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ أ", callback_data="qa_correct_a"),
-            InlineKeyboardButton("✅ ب", callback_data="qa_correct_b"),
-        ]]),
+        f"🔢 *كم عدد خيارات الإجابة لهذا السؤال؟*\n\n"
+        f"أرسل رقماً بين {qs.MIN_OPTIONS} و {qs.MAX_OPTIONS}.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return QA_C_Q_COUNT
+
+
+async def qa_q_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or not (qs.MIN_OPTIONS <= int(text) <= qs.MAX_OPTIONS):
+        await update.message.reply_text(
+            f"⚠️ الرجاء إدخال رقم بين {qs.MIN_OPTIONS} و {qs.MAX_OPTIONS}."
+        )
+        return QA_C_Q_COUNT
+    count = int(text)
+    context.user_data["qa_new_q"]["_count"] = count
+    context.user_data["qa_new_q"]["options"] = []
+    letter = qs.letter_for(0)
+    await update.message.reply_text(f"{letter}) أرسل *نص الخيار الأول*:", parse_mode=ParseMode.MARKDOWN)
+    return QA_C_Q_OPT
+
+
+async def qa_q_opt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("⚠️ الرجاء إدخال نص الخيار.")
+        return QA_C_Q_OPT
+    q = context.user_data["qa_new_q"]
+    q["options"].append(text)
+    count = q.get("_count", 2)
+    if len(q["options"]) < count:
+        letter = qs.letter_for(len(q["options"]))
+        await update.message.reply_text(f"{letter}) أرسل *نص الخيار التالي*:", parse_mode=ParseMode.MARKDOWN)
+        return QA_C_Q_OPT
+
+    lines = [f"{qs.letter_for(i)}) {opt}" for i, opt in enumerate(q["options"])]
+    buttons = [
+        InlineKeyboardButton(f"✅ {qs.letter_for(i)}", callback_data=f"qa_correct_{i}")
+        for i in range(len(q["options"]))
+    ]
+    # Keep rows at most 3 buttons wide for readability.
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await update.message.reply_text(
+        "اختر *الإجابة الصحيحة*:\n\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
     return QA_C_Q_CORRECT
 
 
-async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE, correct: str):
+async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE, correct_index: int):
     quiz_id = context.user_data.get("qa_quiz_id")
     q = context.user_data.get("qa_new_q", {})
-    qs.add_question(quiz_id, q.get("question", ""), q.get("option_a", ""), q.get("option_b", ""), correct)
+    qs.add_question(quiz_id, q.get("question", ""), q.get("options", []), correct_index)
     context.user_data.pop("qa_new_q", None)
     await _reply(
         update,
@@ -715,14 +741,10 @@ async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return QA_C_Q_MORE
 
 
-async def qa_correct_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def qa_correct_dyn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    return await _save_new_question(update, context, "a")
-
-
-async def qa_correct_b(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    return await _save_new_question(update, context, "b")
+    idx = int(update.callback_query.data.replace("qa_correct_", ""))
+    return await _save_new_question(update, context, idx)
 
 
 async def qa_q_more_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -867,11 +889,16 @@ async def qa_q_add_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return QA_C_Q_TEXT
 
 
-def _q_field_kb() -> InlineKeyboardMarkup:
+def _q_field_kb(q: dict = None) -> InlineKeyboardMarkup:
+    options = qs.get_options(q) if q else ["", ""]
+    opt_buttons = [
+        InlineKeyboardButton(f"{qs.letter_for(i)}) الخيار {i + 1}", callback_data=f"qa_qf_opt_{i}")
+        for i in range(len(options))
+    ]
+    opt_rows = [opt_buttons[i:i + 2] for i in range(0, len(opt_buttons), 2)]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 نص السؤال", callback_data="qa_qf_text")],
-        [InlineKeyboardButton("أ) الخيار الأول", callback_data="qa_qf_opta"),
-         InlineKeyboardButton("ب) الخيار الثاني", callback_data="qa_qf_optb")],
+        *opt_rows,
         [InlineKeyboardButton("✅ الإجابة الصحيحة", callback_data="qa_qf_correct")],
         [InlineKeyboardButton("🗑 حذف السؤال", callback_data="qa_qf_delete")],
         [InlineKeyboardButton("🔙 رجوع لقائمة الأسئلة", callback_data="qa_back_to_q_list")],
@@ -880,13 +907,14 @@ def _q_field_kb() -> InlineKeyboardMarkup:
 
 def _q_summary(quiz: dict, idx: int) -> str:
     q = quiz.get("questions", [])[idx]
-    correct = "أ" if q.get("correct") == "a" else "ب"
+    options = qs.get_options(q)
+    correct_idx = qs.get_correct_index(q)
+    lines = [f"{qs.letter_for(i)}) {opt}" for i, opt in enumerate(options)]
     return (
         f"*السؤال {idx + 1}*\n\n"
         f"{q.get('question', '')}\n\n"
-        f"أ) {q.get('option_a', '')}\n"
-        f"ب) {q.get('option_b', '')}\n\n"
-        f"✅ الإجابة الصحيحة: *{correct}*"
+        + "\n".join(lines) +
+        f"\n\n✅ الإجابة الصحيحة: *{qs.letter_for(correct_idx)}*"
     )
 
 
@@ -898,7 +926,8 @@ async def qa_qsel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz    = qs.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
         return await _show_question_list(update, context)
-    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb())
+    q = quiz["questions"][idx]
+    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb(q))
     return QA_E_Q_FIELD_MENU
 
 
@@ -913,7 +942,8 @@ async def _show_q_field_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     quiz    = qs.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
         return await _show_question_list(update, context)
-    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb())
+    q = quiz["questions"][idx]
+    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb(q))
     return QA_E_Q_FIELD_MENU
 
 
@@ -924,17 +954,12 @@ async def qa_qf_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return QA_E_Q_FIELD_VAL
 
 
-async def qa_qf_opta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def qa_qf_opt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    context.user_data["qa_qf_pending"] = "option_a"
-    await _reply(update, "أ) أرسل *نص الخيار الأول* الجديد:")
-    return QA_E_Q_FIELD_VAL
-
-
-async def qa_qf_optb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    context.user_data["qa_qf_pending"] = "option_b"
-    await _reply(update, "ب) أرسل *نص الخيار الثاني* الجديد:")
+    opt_index = int(update.callback_query.data.replace("qa_qf_opt_", ""))
+    context.user_data["qa_qf_pending"] = f"opt_{opt_index}"
+    letter = qs.letter_for(opt_index)
+    await _reply(update, f"{letter}) أرسل *نص الخيار* الجديد:")
     return QA_E_Q_FIELD_VAL
 
 
@@ -944,7 +969,11 @@ async def qa_qf_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx     = context.user_data.get("qa_q_index", 0)
     text    = update.message.text.strip()
     if field and text:
-        qs.update_question(quiz_id, idx, **{field: text})
+        if field.startswith("opt_"):
+            opt_index = int(field.replace("opt_", ""))
+            qs.set_question_option_text(quiz_id, idx, opt_index, text)
+        else:
+            qs.update_question(quiz_id, idx, **{field: text})
     await update.message.reply_text("✅ تم التحديث.")
     quiz = qs.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
@@ -952,25 +981,34 @@ async def qa_qf_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                          reply_markup=InlineKeyboardMarkup(
                                              [[InlineKeyboardButton("🔙 رجوع", callback_data="qa_edit_menu")]]))
         return QA_E_Q_LIST
+    q = quiz["questions"][idx]
     await update.message.reply_text(
         _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=_q_field_kb(),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=_q_field_kb(q),
     )
     return QA_E_Q_FIELD_MENU
 
 
 async def qa_qf_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await _reply(update, "اختر *الإجابة الصحيحة*:", InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ أ", callback_data="qa_qf_setcorrect_a"),
-        InlineKeyboardButton("✅ ب", callback_data="qa_qf_setcorrect_b"),
-    ]]))
+    quiz_id = context.user_data.get("qa_quiz_id")
+    idx     = context.user_data.get("qa_q_index", 0)
+    quiz    = qs.get_quiz(quiz_id)
+    if idx >= len(quiz.get("questions", [])):
+        return await _show_question_list(update, context)
+    options = qs.get_options(quiz["questions"][idx])
+    buttons = [
+        InlineKeyboardButton(f"✅ {qs.letter_for(i)}", callback_data=f"qa_qf_setcorrect_{i}")
+        for i in range(len(options))
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await _reply(update, "اختر *الإجابة الصحيحة*:", InlineKeyboardMarkup(rows))
     return QA_E_Q_FIELD_MENU
 
 
 async def qa_qf_setcorrect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    correct = update.callback_query.data.replace("qa_qf_setcorrect_", "")
+    correct = int(update.callback_query.data.replace("qa_qf_setcorrect_", ""))
     quiz_id = context.user_data.get("qa_quiz_id")
     idx     = context.user_data.get("qa_q_index", 0)
     qs.update_question(quiz_id, idx, correct=correct)
@@ -1056,11 +1094,10 @@ def build_quiz_admin_handler() -> ConversationHandler:
             ],
             # ── Add-question loop (shared) ──
             QA_C_Q_TEXT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, qa_q_text), hub_reentry],
-            QA_C_Q_OPT_A:  [MessageHandler(filters.TEXT & ~filters.COMMAND, qa_q_opt_a), hub_reentry],
-            QA_C_Q_OPT_B:  [MessageHandler(filters.TEXT & ~filters.COMMAND, qa_q_opt_b), hub_reentry],
+            QA_C_Q_COUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, qa_q_count), hub_reentry],
+            QA_C_Q_OPT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, qa_q_opt), hub_reentry],
             QA_C_Q_CORRECT: [
-                CallbackQueryHandler(qa_correct_a, pattern="^qa_correct_a$"),
-                CallbackQueryHandler(qa_correct_b, pattern="^qa_correct_b$"),
+                CallbackQueryHandler(qa_correct_dyn, pattern=r"^qa_correct_\d$"),
                 hub_reentry,
             ],
             QA_C_Q_MORE: [
@@ -1095,10 +1132,9 @@ def build_quiz_admin_handler() -> ConversationHandler:
             ],
             QA_E_Q_FIELD_MENU: [
                 CallbackQueryHandler(qa_qf_text,        pattern="^qa_qf_text$"),
-                CallbackQueryHandler(qa_qf_opta,         pattern="^qa_qf_opta$"),
-                CallbackQueryHandler(qa_qf_optb,         pattern="^qa_qf_optb$"),
+                CallbackQueryHandler(qa_qf_opt,          pattern=r"^qa_qf_opt_\d$"),
                 CallbackQueryHandler(qa_qf_correct,      pattern="^qa_qf_correct$"),
-                CallbackQueryHandler(qa_qf_setcorrect,   pattern=r"^qa_qf_setcorrect_(a|b)$"),
+                CallbackQueryHandler(qa_qf_setcorrect,   pattern=r"^qa_qf_setcorrect_\d$"),
                 CallbackQueryHandler(qa_qf_delete,       pattern="^qa_qf_delete$"),
                 CallbackQueryHandler(qa_back_to_q_list,  pattern="^qa_back_to_q_list$"),
                 hub_reentry,

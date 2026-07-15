@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ── States ────────────────────────────────────────────────────────────────────
 (DT_HUB, DT_LIST, DT_QUIZ_MENU, DT_DEL_CONFIRM,
  DT_C_NAME, DT_C_DESC, DT_C_POINTS, DT_C_TIMED, DT_C_MINUTES, DT_C_VISIBLE,
- DT_C_Q_TEXT, DT_C_Q_OPT_A, DT_C_Q_OPT_B, DT_C_Q_CORRECT, DT_C_Q_MORE,
+ DT_C_Q_TEXT, DT_C_Q_COUNT, DT_C_Q_OPT, DT_C_Q_CORRECT, DT_C_Q_MORE,
  DT_EDIT_MENU, DT_E_NAME, DT_E_DESC, DT_E_POINTS, DT_E_TIMED, DT_E_MINUTES,
  DT_E_Q_LIST, DT_E_Q_FIELD_MENU, DT_E_Q_FIELD_VAL, DT_E_Q_DEL_CONFIRM,
  DT_SPLIT_SIZE, DT_SPLIT_VIEW, DT_RESULTS_VIS,
@@ -690,35 +690,60 @@ async def dt_q_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ الرجاء إدخال نص السؤال.")
         return DT_C_Q_TEXT
     context.user_data["dt_new_q"] = {"question": text}
-    await update.message.reply_text("أ) أرسل *نص الخيار الأول*:")
-    return DT_C_Q_OPT_A
-
-
-async def dt_q_opt_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    context.user_data["dt_new_q"]["option_a"] = text
-    await update.message.reply_text("ب) أرسل *نص الخيار الثاني*:")
-    return DT_C_Q_OPT_B
-
-
-async def dt_q_opt_b(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    context.user_data["dt_new_q"]["option_b"] = text
-    q = context.user_data["dt_new_q"]
     await update.message.reply_text(
-        f"اختر *الإجابة الصحيحة*:\n\nأ) {q['option_a']}\nب) {q['option_b']}",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ أ", callback_data="dt_correct_a"),
-            InlineKeyboardButton("✅ ب", callback_data="dt_correct_b"),
-        ]]),
+        f"🔢 *كم عدد خيارات الإجابة لهذا السؤال؟*\n\n"
+        f"أرسل رقماً بين {ds.MIN_OPTIONS} و {ds.MAX_OPTIONS}.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return DT_C_Q_COUNT
+
+
+async def dt_q_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or not (ds.MIN_OPTIONS <= int(text) <= ds.MAX_OPTIONS):
+        await update.message.reply_text(
+            f"⚠️ الرجاء إدخال رقم بين {ds.MIN_OPTIONS} و {ds.MAX_OPTIONS}."
+        )
+        return DT_C_Q_COUNT
+    count = int(text)
+    context.user_data["dt_new_q"]["_count"] = count
+    context.user_data["dt_new_q"]["options"] = []
+    letter = ds.letter_for(0)
+    await update.message.reply_text(f"{letter}) أرسل *نص الخيار الأول*:", parse_mode=ParseMode.MARKDOWN)
+    return DT_C_Q_OPT
+
+
+async def dt_q_opt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("⚠️ الرجاء إدخال نص الخيار.")
+        return DT_C_Q_OPT
+    q = context.user_data["dt_new_q"]
+    q["options"].append(text)
+    count = q.get("_count", 2)
+    if len(q["options"]) < count:
+        letter = ds.letter_for(len(q["options"]))
+        await update.message.reply_text(f"{letter}) أرسل *نص الخيار التالي*:", parse_mode=ParseMode.MARKDOWN)
+        return DT_C_Q_OPT
+
+    lines = [f"{ds.letter_for(i)}) {opt}" for i, opt in enumerate(q["options"])]
+    buttons = [
+        InlineKeyboardButton(f"✅ {ds.letter_for(i)}", callback_data=f"dt_correct_{i}")
+        for i in range(len(q["options"]))
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await update.message.reply_text(
+        "اختر *الإجابة الصحيحة*:\n\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
     return DT_C_Q_CORRECT
 
 
-async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE, correct: str):
+async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE, correct_index: int):
     quiz_id = context.user_data.get("dt_quiz_id")
     q = context.user_data.get("dt_new_q", {})
-    ds.add_question(quiz_id, q.get("question", ""), q.get("option_a", ""), q.get("option_b", ""), correct)
+    ds.add_question(quiz_id, q.get("question", ""), q.get("options", []), correct_index)
     context.user_data.pop("dt_new_q", None)
     await _reply(
         update,
@@ -731,14 +756,10 @@ async def _save_new_question(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return DT_C_Q_MORE
 
 
-async def dt_correct_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def dt_correct_dyn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    return await _save_new_question(update, context, "a")
-
-
-async def dt_correct_b(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    return await _save_new_question(update, context, "b")
+    idx = int(update.callback_query.data.replace("dt_correct_", ""))
+    return await _save_new_question(update, context, idx)
 
 
 async def dt_q_more_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -883,11 +904,16 @@ async def dt_q_add_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DT_C_Q_TEXT
 
 
-def _q_field_kb() -> InlineKeyboardMarkup:
+def _q_field_kb(q: dict = None) -> InlineKeyboardMarkup:
+    options = ds.get_options(q) if q else ["", ""]
+    opt_buttons = [
+        InlineKeyboardButton(f"{ds.letter_for(i)}) الخيار {i + 1}", callback_data=f"dt_qf_opt_{i}")
+        for i in range(len(options))
+    ]
+    opt_rows = [opt_buttons[i:i + 2] for i in range(0, len(opt_buttons), 2)]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 نص السؤال", callback_data="dt_qf_text")],
-        [InlineKeyboardButton("أ) الخيار الأول", callback_data="dt_qf_opta"),
-         InlineKeyboardButton("ب) الخيار الثاني", callback_data="dt_qf_optb")],
+        *opt_rows,
         [InlineKeyboardButton("✅ الإجابة الصحيحة", callback_data="dt_qf_correct")],
         [InlineKeyboardButton("🗑 حذف السؤال", callback_data="dt_qf_delete")],
         [InlineKeyboardButton("🔙 رجوع لقائمة الأسئلة", callback_data="dt_back_to_q_list")],
@@ -896,13 +922,14 @@ def _q_field_kb() -> InlineKeyboardMarkup:
 
 def _q_summary(quiz: dict, idx: int) -> str:
     q = quiz.get("questions", [])[idx]
-    correct = "أ" if q.get("correct") == "a" else "ب"
+    options = ds.get_options(q)
+    correct_idx = ds.get_correct_index(q)
+    lines = [f"{ds.letter_for(i)}) {opt}" for i, opt in enumerate(options)]
     return (
         f"*السؤال {idx + 1}*\n\n"
         f"{q.get('question', '')}\n\n"
-        f"أ) {q.get('option_a', '')}\n"
-        f"ب) {q.get('option_b', '')}\n\n"
-        f"✅ الإجابة الصحيحة: *{correct}*"
+        + "\n".join(lines) +
+        f"\n\n✅ الإجابة الصحيحة: *{ds.letter_for(correct_idx)}*"
     )
 
 
@@ -914,7 +941,8 @@ async def dt_qsel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz    = ds.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
         return await _show_question_list(update, context)
-    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb())
+    q = quiz["questions"][idx]
+    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb(q))
     return DT_E_Q_FIELD_MENU
 
 
@@ -929,7 +957,8 @@ async def _show_q_field_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     quiz    = ds.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
         return await _show_question_list(update, context)
-    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb())
+    q = quiz["questions"][idx]
+    await _reply(update, _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:", _q_field_kb(q))
     return DT_E_Q_FIELD_MENU
 
 
@@ -940,17 +969,12 @@ async def dt_qf_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DT_E_Q_FIELD_VAL
 
 
-async def dt_qf_opta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def dt_qf_opt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    context.user_data["dt_qf_pending"] = "option_a"
-    await _reply(update, "أ) أرسل *نص الخيار الأول* الجديد:")
-    return DT_E_Q_FIELD_VAL
-
-
-async def dt_qf_optb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    context.user_data["dt_qf_pending"] = "option_b"
-    await _reply(update, "ب) أرسل *نص الخيار الثاني* الجديد:")
+    opt_index = int(update.callback_query.data.replace("dt_qf_opt_", ""))
+    context.user_data["dt_qf_pending"] = f"opt_{opt_index}"
+    letter = ds.letter_for(opt_index)
+    await _reply(update, f"{letter}) أرسل *نص الخيار* الجديد:")
     return DT_E_Q_FIELD_VAL
 
 
@@ -960,7 +984,11 @@ async def dt_qf_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx     = context.user_data.get("dt_q_index", 0)
     text    = update.message.text.strip()
     if field and text:
-        ds.update_question(quiz_id, idx, **{field: text})
+        if field.startswith("opt_"):
+            opt_index = int(field.replace("opt_", ""))
+            ds.set_question_option_text(quiz_id, idx, opt_index, text)
+        else:
+            ds.update_question(quiz_id, idx, **{field: text})
     await update.message.reply_text("✅ تم التحديث.")
     quiz = ds.get_quiz(quiz_id)
     if idx >= len(quiz.get("questions", [])):
@@ -968,25 +996,34 @@ async def dt_qf_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                          reply_markup=InlineKeyboardMarkup(
                                              [[InlineKeyboardButton("🔙 رجوع", callback_data="dt_edit_menu")]]))
         return DT_E_Q_LIST
+    q = quiz["questions"][idx]
     await update.message.reply_text(
         _q_summary(quiz, idx) + "\n\nاختر ما تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=_q_field_kb(),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=_q_field_kb(q),
     )
     return DT_E_Q_FIELD_MENU
 
 
 async def dt_qf_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await _reply(update, "اختر *الإجابة الصحيحة*:", InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ أ", callback_data="dt_qf_setcorrect_a"),
-        InlineKeyboardButton("✅ ب", callback_data="dt_qf_setcorrect_b"),
-    ]]))
+    quiz_id = context.user_data.get("dt_quiz_id")
+    idx     = context.user_data.get("dt_q_index", 0)
+    quiz    = ds.get_quiz(quiz_id)
+    if idx >= len(quiz.get("questions", [])):
+        return await _show_question_list(update, context)
+    options = ds.get_options(quiz["questions"][idx])
+    buttons = [
+        InlineKeyboardButton(f"✅ {ds.letter_for(i)}", callback_data=f"dt_qf_setcorrect_{i}")
+        for i in range(len(options))
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await _reply(update, "اختر *الإجابة الصحيحة*:", InlineKeyboardMarkup(rows))
     return DT_E_Q_FIELD_MENU
 
 
 async def dt_qf_setcorrect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    correct = update.callback_query.data.replace("dt_qf_setcorrect_", "")
+    correct = int(update.callback_query.data.replace("dt_qf_setcorrect_", ""))
     quiz_id = context.user_data.get("dt_quiz_id")
     idx     = context.user_data.get("dt_q_index", 0)
     ds.update_question(quiz_id, idx, correct=correct)
@@ -1073,11 +1110,10 @@ def build_distro_admin_handler() -> ConversationHandler:
             ],
             # ── Add-question loop (shared) ──
             DT_C_Q_TEXT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, dt_q_text), hub_reentry],
-            DT_C_Q_OPT_A:  [MessageHandler(filters.TEXT & ~filters.COMMAND, dt_q_opt_a), hub_reentry],
-            DT_C_Q_OPT_B:  [MessageHandler(filters.TEXT & ~filters.COMMAND, dt_q_opt_b), hub_reentry],
+            DT_C_Q_COUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, dt_q_count), hub_reentry],
+            DT_C_Q_OPT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, dt_q_opt), hub_reentry],
             DT_C_Q_CORRECT: [
-                CallbackQueryHandler(dt_correct_a, pattern="^dt_correct_a$"),
-                CallbackQueryHandler(dt_correct_b, pattern="^dt_correct_b$"),
+                CallbackQueryHandler(dt_correct_dyn, pattern=r"^dt_correct_\d$"),
                 hub_reentry,
             ],
             DT_C_Q_MORE: [
@@ -1112,10 +1148,9 @@ def build_distro_admin_handler() -> ConversationHandler:
             ],
             DT_E_Q_FIELD_MENU: [
                 CallbackQueryHandler(dt_qf_text,        pattern="^dt_qf_text$"),
-                CallbackQueryHandler(dt_qf_opta,         pattern="^dt_qf_opta$"),
-                CallbackQueryHandler(dt_qf_optb,         pattern="^dt_qf_optb$"),
+                CallbackQueryHandler(dt_qf_opt,          pattern=r"^dt_qf_opt_\d$"),
                 CallbackQueryHandler(dt_qf_correct,      pattern="^dt_qf_correct$"),
-                CallbackQueryHandler(dt_qf_setcorrect,   pattern=r"^dt_qf_setcorrect_(a|b)$"),
+                CallbackQueryHandler(dt_qf_setcorrect,   pattern=r"^dt_qf_setcorrect_\d$"),
                 CallbackQueryHandler(dt_qf_delete,       pattern="^dt_qf_delete$"),
                 CallbackQueryHandler(dt_back_to_q_list,  pattern="^dt_back_to_q_list$"),
                 hub_reentry,

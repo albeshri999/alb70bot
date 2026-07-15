@@ -151,17 +151,76 @@ def is_results_visible(quiz: dict) -> bool:
     return bool(quiz.get("show_score", True))
 
 
-def add_question(quiz_id, question: str, option_a: str, option_b: str, correct: str) -> None:
+LETTERS = ["أ", "ب", "ج", "د", "هـ", "و"]
+MIN_OPTIONS = 2
+MAX_OPTIONS = 6
+
+
+def letter_for(index: int) -> str:
+    """Arabic letter label for option position (0-based). Falls back to a
+    numeral for anything beyond the supported range (should never happen
+    since options are capped at MAX_OPTIONS)."""
+    if 0 <= index < len(LETTERS):
+        return LETTERS[index]
+    return str(index + 1)
+
+
+def get_options(q: dict) -> list:
+    """Returns this question's options as a list, regardless of whether it
+    was created under the new (2-6 option) format or the old fixed
+    option_a/option_b format — so previously-created questions keep working
+    unmodified."""
+    if "options" in q and isinstance(q["options"], list):
+        return q["options"]
+    return [q.get("option_a", ""), q.get("option_b", "")]
+
+
+def get_correct_index(q: dict) -> int:
+    """Returns the 0-based index of the correct option, for either the new
+    format ('correct' is an int) or the legacy format ('correct' is 'a'/'b')."""
+    c = q.get("correct")
+    if isinstance(c, int):
+        return c
+    if c == "a":
+        return 0
+    if c == "b":
+        return 1
+    return 0
+
+
+def add_question(quiz_id, question: str, options: list, correct_index: int) -> None:
+    """Add a question with 2-6 options. `options` is an ordered list of
+    option texts; `correct_index` is the 0-based index of the correct one."""
     quiz = get_quiz(quiz_id)
     questions = quiz.get("questions", [])
     questions.append({
         "question": question,
-        "option_a": option_a,
-        "option_b": option_b,
-        "correct": correct,  # "a" or "b"
+        "options": list(options),
+        "correct": int(correct_index),
     })
     quiz["questions"] = questions
     save_quiz(quiz_id, quiz)
+
+
+def set_question_option_text(quiz_id, index: int, option_index: int, text: str) -> bool:
+    """Update the text of a single option on an existing question, without
+    touching its other options or its correct-answer index."""
+    quiz = get_quiz(quiz_id)
+    questions = quiz.get("questions", [])
+    if not (0 <= index < len(questions)):
+        return False
+    q = questions[index]
+    options = get_options(q)
+    if not (0 <= option_index < len(options)):
+        return False
+    options[option_index] = text
+    q["options"] = options
+    q.pop("option_a", None)
+    q.pop("option_b", None)
+    questions[index] = q
+    quiz["questions"] = questions
+    save_quiz(quiz_id, quiz)
+    return True
 
 
 def update_question(quiz_id, index: int, **fields) -> bool:
@@ -329,10 +388,18 @@ def start_session(user_id, quiz_id) -> dict:
     ('option_swap') — see get_shuffled_question() below. Both are generated
     once here and stay fixed for the rest of this attempt."""
     quiz      = get_quiz(quiz_id)
-    n         = len(quiz.get("questions", []))
+    questions = quiz.get("questions", [])
+    n         = len(questions)
     order     = list(range(n))
     random.shuffle(order)
-    swap      = {str(i): random.choice([True, False]) for i in range(n)}
+    # Per-question random permutation of its options (works for any option
+    # count from 2 to 6 — not just the old fixed a/b pair).
+    swap = {}
+    for i, q in enumerate(questions):
+        n_opts = len(get_options(q))
+        perm = list(range(n_opts))
+        random.shuffle(perm)
+        swap[str(i)] = perm
 
     sessions = load_sessions()
     session = {
@@ -363,20 +430,30 @@ def get_shuffled_question(quiz: dict, session: dict, position: int):
     if orig_index >= len(questions):
         return None
     q = questions[orig_index]
-    swap = bool((session.get("option_swap") or {}).get(str(orig_index), False))
-    if swap:
-        option_a = q.get("option_b", "")
-        option_b = q.get("option_a", "")
-        correct  = "a" if q.get("correct") == "b" else "b"
+    options      = get_options(q)
+    correct_idx  = get_correct_index(q)
+    raw_perm     = (session.get("option_swap") or {}).get(str(orig_index))
+
+    if isinstance(raw_perm, list) and len(raw_perm) == len(options):
+        perm = raw_perm
+    elif isinstance(raw_perm, bool):
+        # Legacy sessions (started before this update) stored a simple
+        # True/False swap for exactly 2 options — translate it so
+        # in-progress attempts keep working exactly as before.
+        perm = [1, 0] if raw_perm else [0, 1]
     else:
-        option_a = q.get("option_a", "")
-        option_b = q.get("option_b", "")
-        correct  = q.get("correct")
+        perm = list(range(len(options)))
+
+    shuffled_options = [options[p] for p in perm if p < len(options)]
+    try:
+        new_correct = perm.index(correct_idx)
+    except ValueError:
+        new_correct = 0
+
     return {
         "question":    q.get("question", ""),
-        "option_a":    option_a,
-        "option_b":    option_b,
-        "correct":     correct,
+        "options":     shuffled_options,
+        "correct":     new_correct,
         "orig_index":  orig_index,
     }
 
