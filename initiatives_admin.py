@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
  IN_VIS_MENU,
  IN_RES_MENU, IN_RES_LIST, IN_RES_DETAIL,
  IN_REQ_FILTER, IN_REQ_LIST, IN_REQ_DETAIL,
- ) = range(20)
+ ) = range(21)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
