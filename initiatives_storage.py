@@ -23,6 +23,19 @@ STATUS_PENDING   = "pending"
 STATUS_ACCEPTED  = "accepted"
 STATUS_REJECTED  = "rejected"
 STATUS_COMPLETED = "completed"
+STATUS_CANCELLED = "cancelled"
+
+# Statuses that count as "this participant currently has an open initiative"
+# — blocks them from requesting any other initiative until resolved.
+OPEN_STATUSES = (STATUS_PENDING, STATUS_ACCEPTED)
+
+STATUS_LABELS = {
+    STATUS_PENDING:   "🟡 قيد الانتظار",
+    STATUS_ACCEPTED:  "🟢 قيد التنفيذ",
+    STATUS_COMPLETED: "✔ مكتملة",
+    STATUS_REJECTED:  "❌ مرفوضة",
+    STATUS_CANCELLED: "🚫 ملغاة",
+}
 
 
 def _load_json(filepath: str, default):
@@ -131,9 +144,45 @@ def get_request(initiative_id, user_id):
 
 def has_open_request(initiative_id, user_id) -> bool:
     """True if this participant already has a pending or accepted (i.e. not
-    yet resolved to rejected/completed) request for this initiative."""
+    yet resolved) request for this SPECIFIC initiative."""
     r = get_request(initiative_id, user_id)
-    return bool(r) and r.get("status") in (STATUS_PENDING, STATUS_ACCEPTED)
+    return bool(r) and r.get("status") in OPEN_STATUSES
+
+
+def user_open_request(user_id):
+    """This participant's single open (pending/accepted) request, across
+    ALL initiatives, or None. A participant may only ever have one at a
+    time — see user_has_any_open_request()."""
+    uid = str(user_id)
+    for r in load_requests():
+        if str(r.get("user_id")) == uid and r.get("status") in OPEN_STATUSES:
+            return r
+    return None
+
+
+def user_has_any_open_request(user_id) -> bool:
+    return user_open_request(user_id) is not None
+
+
+def requests_for_user(user_id) -> list:
+    """Every request (any status) this participant has ever made, most
+    recent first — used for '📌 مبادراتي'."""
+    uid = str(user_id)
+    out = [r for r in load_requests() if str(r.get("user_id")) == uid]
+    return sorted(out, key=lambda r: r.get("requested_at", ""), reverse=True)
+
+
+def requests_by_status(status) -> list:
+    """Every request across ALL initiatives with the given status (or all
+    statuses if status is falsy), chronologically — used for the admin's
+    '📊 طلبات التنفيذ' filter view."""
+    out = load_requests() if not status else [r for r in load_requests() if r.get("status") == status]
+    return sorted(out, key=lambda r: r.get("requested_at", ""))
+
+
+def cancel_request(initiative_id, user_id, **extra) -> None:
+    set_request_status(initiative_id, user_id, STATUS_CANCELLED,
+                        cancelled_at=datetime.utcnow().isoformat(), **extra)
 
 
 def create_request(initiative_id, user_id, user_name: str) -> dict:

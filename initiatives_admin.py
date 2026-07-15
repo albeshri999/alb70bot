@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 (IN_HUB, IN_LIST, IN_ITEM_MENU, IN_DEL_CONFIRM,
  IN_C_NAME, IN_C_DESC, IN_C_POINTS, IN_C_VISIBLE,
  IN_EDIT_MENU, IN_E_NAME, IN_E_DESC, IN_E_POINTS,
- IN_REQ_LIST, IN_REQ_DETAIL,
- ) = range(14)
+ IN_REQ_FILTER, IN_REQ_LIST, IN_REQ_DETAIL,
+ ) = range(15)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -309,35 +309,72 @@ async def in_e_points_val(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Execution requests (📊 طلبات التنفيذ) ──────────────────────────────────
 
+_FILTER_BUTTONS = [
+    ("📋 كل الطلبات",     None),
+    ("🟡 قيد الانتظار",   ins.STATUS_PENDING),
+    ("🟢 قيد التنفيذ",    ins.STATUS_ACCEPTED),
+    ("✔ مكتملة",          ins.STATUS_COMPLETED),
+    ("❌ مرفوضة",          ins.STATUS_REJECTED),
+    ("🚫 ملغاة",           ins.STATUS_CANCELLED),
+]
+_FILTER_CB = {
+    None: "in_reqf_all",
+    ins.STATUS_PENDING: "in_reqf_pending",
+    ins.STATUS_ACCEPTED: "in_reqf_accepted",
+    ins.STATUS_COMPLETED: "in_reqf_completed",
+    ins.STATUS_REJECTED: "in_reqf_rejected",
+    ins.STATUS_CANCELLED: "in_reqf_cancelled",
+}
+_CB_TO_STATUS = {v: k for k, v in _FILTER_CB.items()}
+
+
 def _req_label(r: dict) -> str:
     initiative = ins.get_initiative(r.get("initiative_id"))
     name = initiative.get("name", "—")
-    status_label = {"pending": "⏳ قيد الانتظار", "accepted": "✅ مقبول (قيد التنفيذ)"}.get(
-        r.get("status"), r.get("status")
-    )
+    status_label = ins.STATUS_LABELS.get(r.get("status"), r.get("status"))
     return f"{r.get('user_name', '—')} — {name} — {status_label}"
 
 
-def _req_list_kb() -> InlineKeyboardMarkup:
-    requests = ins.all_open_requests()
+def _filter_menu_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=_FILTER_CB[status])] for label, status in _FILTER_BUTTONS]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _req_list_kb(status) -> InlineKeyboardMarkup:
+    requests = ins.requests_by_status(status)
     rows = [
         [InlineKeyboardButton(_req_label(r)[:64], callback_data=f"in_req_{r['initiative_id']}_{r['user_id']}")]
         for r in requests
     ]
-    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")])
     return InlineKeyboardMarkup(rows)
 
 
 async def in_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    requests = ins.all_open_requests()
+    await _reply(update, "📊 *طلبات التنفيذ*\n\nاختر التصفية:", _filter_menu_kb())
+    return IN_REQ_FILTER
+
+
+async def in_req_filter_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    status = _CB_TO_STATUS.get(query.data)
+    context.user_data["in_req_filter"] = status
+    return await _show_req_list(update, context)
+
+
+async def _show_req_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = context.user_data.get("in_req_filter")
+    requests = ins.requests_by_status(status)
     if not requests:
         await _reply(
-            update, "📭 لا توجد طلبات تنفيذ حالياً.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_hub")]]),
+            update, "📭 لا توجد طلبات بهذه الحالة.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]]),
         )
         return IN_REQ_LIST
-    await _reply(update, "📊 *طلبات التنفيذ*\n\nمرتبة حسب وقت الطلب (الأول فالأول):", _req_list_kb())
+    await _reply(update, "📊 *طلبات التنفيذ*\n\nمرتبة حسب وقت الطلب (الأول فالأول):", _req_list_kb(status))
     return IN_REQ_LIST
 
 
@@ -352,28 +389,35 @@ async def in_req_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     r = ins.get_request(initiative_id, user_id)
     initiative = ins.get_initiative(initiative_id)
     if not r or not initiative:
-        return await in_requests(update, context)
+        return await _show_req_list(update, context)
 
     text = (
         f"👤 *{r.get('user_name', '—')}*\n"
         f"💡 المبادرة: *{initiative.get('name')}*\n"
         f"🏆 النقاط: *{initiative.get('points', 0)}*\n"
+        f"الحالة: *{ins.STATUS_LABELS.get(r.get('status'), r.get('status'))}*\n"
     )
     if r.get("status") == ins.STATUS_PENDING:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ قبول التنفيذ", callback_data="in_req_accept")],
             [InlineKeyboardButton("❌ رفض الطلب", callback_data="in_req_reject")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")],
         ])
     elif r.get("status") == ins.STATUS_ACCEPTED:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✔️ تم التنفيذ", callback_data="in_req_complete")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")],
+            [InlineKeyboardButton("🚫 إلغاء المبادرة", callback_data="in_req_cancel")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")],
         ])
     else:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]])
     await _reply(update, text, kb)
     return IN_REQ_DETAIL
+
+
+async def in_req_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _show_req_list(update, context)
 
 
 async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,7 +430,7 @@ async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=int(user_id),
-            text="🎉 تم قبول طلبك.\n\nابدأ بتنفيذ المبادرة. وسيتم تقييمها بعد الانتهاء.",
+            text="🟢 تم قبول طلبك، يمكنك البدء بالتنفيذ.",
         )
     except Exception as e:
         logger.warning("initiative accept notify failed: %s", e)
@@ -398,8 +442,8 @@ async def in_req_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("achievements first_initiative check failed: %s", e)
 
     await _reply(update, "✅ تم قبول الطلب وإشعار المتسابق.",
-                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]]))
-    return IN_REQ_LIST
+                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
+    return IN_REQ_DETAIL
 
 
 async def in_req_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -412,14 +456,33 @@ async def in_req_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=int(user_id),
-            text="نعتذر.\n\nلم يتم قبول طلب تنفيذ هذه المبادرة.",
+            text="❌ تم رفض طلب المبادرة.",
         )
     except Exception as e:
         logger.warning("initiative reject notify failed: %s", e)
 
     await _reply(update, "✅ تم رفض الطلب وإشعار المتسابق.",
-                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]]))
-    return IN_REQ_LIST
+                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
+    return IN_REQ_DETAIL
+
+
+async def in_req_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    initiative_id = context.user_data.get("in_req_initiative_id")
+    user_id       = context.user_data.get("in_req_user_id")
+    ins.cancel_request(initiative_id, user_id)
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id),
+            text="🚫 تم إلغاء المبادرة.",
+        )
+    except Exception as e:
+        logger.warning("initiative cancel notify failed: %s", e)
+
+    await _reply(update, "✅ تم إلغاء المبادرة وإشعار المتسابق.",
+                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
+    return IN_REQ_DETAIL
 
 
 async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,8 +508,8 @@ async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=int(user_id),
             text=(
-                "🎉 تم تنفيذ المبادرة بنجاح!\n\n"
-                f"➕ تمت إضافة *{points}* نقطة إلى رصيدك."
+                "✔ تم اعتماد تنفيذ المبادرة، وتمت إضافة نقاطها إلى رصيدك.\n\n"
+                f"➕ *{points}* نقطة."
             ),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -460,8 +523,8 @@ async def in_req_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("achievements initiative-completion check failed: %s", e)
 
     await _reply(update, f"✅ تم احتساب *{points}* نقطة للمتسابق وإشعاره.",
-                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_requests")]]))
-    return IN_REQ_LIST
+                 InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="in_req_back")]]))
+    return IN_REQ_DETAIL
 
 
 # ── Cancel fallback ───────────────────────────────────────────────────────────
@@ -511,6 +574,10 @@ def build_initiatives_admin_handler() -> ConversationHandler:
             IN_E_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_name_val), hub_reentry],
             IN_E_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_desc_val), hub_reentry],
             IN_E_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, in_e_points_val), hub_reentry],
+            IN_REQ_FILTER: [
+                CallbackQueryHandler(in_req_filter_sel, pattern=r"^in_reqf_\w+$"),
+                hub_reentry,
+            ],
             IN_REQ_LIST: [
                 CallbackQueryHandler(in_req_sel,   pattern=r"^in_req_\w+_\d+$"),
                 CallbackQueryHandler(in_requests,  pattern="^in_requests$"),
@@ -520,6 +587,8 @@ def build_initiatives_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(in_req_accept,   pattern="^in_req_accept$"),
                 CallbackQueryHandler(in_req_reject,   pattern="^in_req_reject$"),
                 CallbackQueryHandler(in_req_complete,  pattern="^in_req_complete$"),
+                CallbackQueryHandler(in_req_cancel,    pattern="^in_req_cancel$"),
+                CallbackQueryHandler(in_req_back,      pattern="^in_req_back$"),
                 CallbackQueryHandler(in_requests,     pattern="^in_requests$"),
                 hub_reentry,
             ],
