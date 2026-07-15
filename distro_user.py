@@ -209,8 +209,8 @@ async def handle_distro_view(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"❓ عدد الأسئلة: *{n_q}*",
         time_line,
         "",
-        "ℹ️ هذا الاختبار لا يضيف نقاطاً لرصيدك ولا يدخل في لوحة الشرف — "
-        "الهدف منه فقط تنظيم توزيع الفرق.",
+        
+        ,
     ]
     if n_q == 0:
         lines.append("\n⚠️ لا توجد أسئلة في هذا الاختبار بعد.")
