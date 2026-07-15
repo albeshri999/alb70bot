@@ -145,6 +145,12 @@ def update_quiz_field(quiz_id, **fields) -> None:
         save_quiz(quiz_id, quiz)
 
 
+def is_results_visible(quiz: dict) -> bool:
+    """Whether a participant sees their own score/percentage/answer-review
+    after finishing. The admin's own results view is never affected by this."""
+    return bool(quiz.get("show_score", True))
+
+
 def add_question(quiz_id, question: str, option_a: str, option_b: str, correct: str) -> None:
     quiz = get_quiz(quiz_id)
     questions = quiz.get("questions", [])

@@ -102,6 +102,10 @@ def create_quiz(name: str, description: str, points_per_question: int,
         # to participants at all, while a visible-but-closed test still
         # appears in the list but blocks starting a new attempt.
         "entry_open": True,
+        # Whether a participant sees their own score/answer-review after
+        # finishing (independent of everything else here). The admin's own
+        # results view is never affected by this.
+        "show_score": True,
         # Countdown clock (timed tests) is anchored to the moment the test
         # becomes visible — same convention as the existing quiz system, so
         # every participant shares the same deadline.
@@ -209,6 +213,12 @@ def set_entry_open(quiz_id, open_: bool) -> None:
 def is_entry_open(quiz: dict) -> bool:
     """Defaults to True so older records (before this field existed) keep working."""
     return bool(quiz.get("entry_open", True))
+
+
+def is_results_visible(quiz: dict) -> bool:
+    """Whether a participant sees their own score/percentage/answer-review
+    after finishing. The admin's own results view is never affected by this."""
+    return bool(quiz.get("show_score", True))
 
 
 def visible_quizzes() -> dict:

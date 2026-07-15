@@ -266,6 +266,77 @@ async def handle_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         _schedule_timer(context, user_id, query.message.chat_id, query.message.message_id)
 
 
+def _fmt_duration_short(seconds) -> str:
+    seconds = max(0, int(seconds or 0))
+    m, s = divmod(seconds, 60)
+    return f"{m} د {s} ث" if m else f"{s} ث"
+
+
+def _build_results_blocks(quiz: dict, score: int, total_points: int, correct_count: int,
+                           wrong_count: int, percentage: float, duration_seconds,
+                           review: list) -> list:
+    """One 'block' of text per logical piece (summary, then one per question).
+    _pack_blocks() below groups these into Telegram-message-sized chunks."""
+    blocks = [
+        "✅ *انتهى الاختبار*\n\n"
+        f"📊 اسم الاختبار: *{quiz.get('name', '—')}*\n"
+        f"🏆 الدرجة: *{score}* من *{total_points}*\n"
+        f"📈 النسبة المئوية: *{percentage}٪*\n"
+        f"✅ الإجابات الصحيحة: *{correct_count}*\n"
+        f"❌ الإجابات الخاطئة: *{wrong_count}*\n"
+        f"⏱ مدة الحل: *{_fmt_duration_short(duration_seconds)}*"
+    ]
+    for i, r in enumerate(review, 1):
+        chosen  = r.get("chosen")
+        correct = r.get("correct")
+        chosen_text  = r.get("option_a") if chosen == "a" else r.get("option_b")
+        correct_text = r.get("option_a") if correct == "a" else r.get("option_b")
+        lines = [
+            f"*السؤال {i}:* {r.get('question', '')}",
+            f"أ) {r.get('option_a', '')}",
+            f"ب) {r.get('option_b', '')}",
+            "",
+        ]
+        if chosen == correct:
+            lines.append(f"🟢 إجابتك:\n{chosen_text}")
+            lines.append("✅ إجابتك صحيحة")
+        else:
+            lines.append(f"🔴 إجابتك:\n{chosen_text or '—'}")
+            lines.append(f"🟢 الإجابة الصحيحة:\n{correct_text}")
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def _pack_blocks(blocks: list, limit: int = 3500) -> list:
+    """Greedily pack blocks into <=`limit`-char chunks (Telegram messages
+    cap at 4096 chars; 3500 leaves comfortable headroom)."""
+    chunks, current = [], ""
+    for block in blocks:
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _send_chunks(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        chunks: list, keyboard=None) -> None:
+    if not chunks:
+        return
+    await _edit(update, chunks[0], keyboard if len(chunks) == 1 else None)
+    chat_id = update.callback_query.message.chat_id
+    for chunk in chunks[1:-1]:
+        await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.MARKDOWN)
+    if len(chunks) > 1:
+        await context.bot.send_message(
+            chat_id=chat_id, text=chunks[-1], parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+        )
+
+
 async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         user_id: int, quiz: dict, session: dict) -> None:
     _cancel_timer(context, user_id)
@@ -281,9 +352,26 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     started_at = session.get("started_at")
     try:
-        duration = (datetime.utcnow() - datetime.fromisoformat(started_at)).total_seconds()
+        duration_seconds = (datetime.utcnow() - datetime.fromisoformat(started_at)).total_seconds()
     except Exception:
-        duration = 0
+        duration_seconds = 0
+
+    # Build the per-question review in the participant's OWN shuffled order,
+    # using the still-live session dict (question_order/option_swap) before
+    # end_session() below removes it from storage.
+    review  = []
+    answers = session.get("answers", [])
+    for pos in range(n_q):
+        sq = qs.get_shuffled_question(quiz, session, pos)
+        if not sq:
+            continue
+        review.append({
+            "question": sq["question"],
+            "option_a": sq["option_a"],
+            "option_b": sq["option_b"],
+            "chosen":   answers[pos] if pos < len(answers) else None,
+            "correct":  sq["correct"],
+        })
 
     user = get_user(user_id) or {}
     qs.add_quiz_result({
@@ -297,22 +385,23 @@ async def _finish_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "percentage":  percentage,
         "started_at":  started_at,
         "finished_at": datetime.utcnow().isoformat(),
-        "duration_seconds": int(duration),
+        "duration_seconds": int(duration_seconds),
+        "review":      review,
     })
     qs.end_session(user_id)
 
-    if quiz.get("show_score", True):
-        text = (
-            "✅ *انتهى الاختبار*\n\n"
-            f"🏆 الدرجة: *{score}* من *{total_points}*\n"
-            f"✔️ الإجابات الصحيحة: *{correct_count}*\n"
-            f"❌ الإجابات الخاطئة: *{wrong_count}*\n"
-            f"📊 النسبة المئوية: *{percentage}٪*"
+    if qs.is_results_visible(quiz):
+        blocks = _build_results_blocks(
+            quiz, score, total_points, correct_count, wrong_count,
+            percentage, duration_seconds, review,
         )
+        await _send_chunks(update, context, _pack_blocks(blocks), _back_kb("menu_quizzes"))
     else:
-        text = "✅ *انتهى الاختبار*\n\nوفقكم الله 🌿"
-
-    await _edit(update, text, _back_kb("menu_quizzes"))
+        text = (
+            "✅ تم استلام إجاباتك بنجاح.\n\n"
+            "يرجى انتظار إعلان النتائج من قبل المشرف."
+        )
+        await _edit(update, text, _back_kb("menu_quizzes"))
 
 
 async def _expire_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:

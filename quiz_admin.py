@@ -41,7 +41,8 @@ logger = logging.getLogger(__name__)
  QA_C_Q_TEXT, QA_C_Q_OPT_A, QA_C_Q_OPT_B, QA_C_Q_CORRECT, QA_C_Q_MORE,
  QA_EDIT_MENU, QA_E_NAME, QA_E_DESC, QA_E_POINTS, QA_E_TIMED, QA_E_MINUTES,
  QA_E_Q_LIST, QA_E_Q_FIELD_MENU, QA_E_Q_FIELD_VAL, QA_E_Q_DEL_CONFIRM,
- ) = range(25)
+ QA_RESULTS_VIS,
+ ) = range(26)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,12 +159,11 @@ async def qa_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _quiz_menu_kb(quiz: dict) -> InlineKeyboardMarkup:
     vis    = "👁 إخفاء الاختبار" if quiz.get("visible") else "👁 إظهار الاختبار"
-    score  = "🙈 إخفاء الدرجة عن المتسابق" if quiz.get("show_score", True) else "👁 إظهار الدرجة للمتسابق"
     retake = "🔁 منع إعادة الاختبار" if quiz.get("allow_retake") else "🔁 السماح بإعادة الاختبار"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تعديل", callback_data="qa_edit_menu")],
         [InlineKeyboardButton(vis, callback_data="qa_toggle_visible")],
-        [InlineKeyboardButton(score, callback_data="qa_toggle_score")],
+        [InlineKeyboardButton("👁 نتائج المتسابقين", callback_data="qa_results_vis_menu")],
         [InlineKeyboardButton(retake, callback_data="qa_toggle_retake")],
         [InlineKeyboardButton("📊 النتائج", callback_data="qa_show_results")],
         [InlineKeyboardButton("🗑 حذف", callback_data="qa_delete_confirm")],
@@ -187,7 +187,7 @@ def _quiz_summary(quiz: dict) -> str:
         f"🔢 درجة كل سؤال: *{quiz.get('points_per_question', 0)}*  (الإجمالي: *{total}*)",
         f"⏱ الوقت: *{time_line}*",
         f"👁 ظاهر للمتسابقين: *{'نعم' if quiz.get('visible') else 'لا'}*",
-        f"📊 إظهار الدرجة للمتسابق: *{'نعم' if quiz.get('show_score', True) else 'لا'}*",
+        f"👁 نتائج المتسابقين: *{'ظاهرة' if qs.is_results_visible(quiz) else 'مخفية'}*",
         f"🔁 السماح بالإعادة: *{'نعم' if quiz.get('allow_retake') else 'لا'}*",
     ]
     return "\n".join(lines)
@@ -216,12 +216,45 @@ async def qa_toggle_visible(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _show_quiz_menu(update, context)
 
 
-async def qa_toggle_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def _results_vis_text(quiz: dict) -> str:
+    status = ("✅ إظهار النتائج للمتسابقين" if qs.is_results_visible(quiz)
+              else "❌ إخفاء النتائج عن المتسابقين")
+    return f"👁 *نتائج المتسابقين*\n\nالحالة الحالية:\n{status}"
+
+
+def _results_vis_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تفعيل", callback_data="qa_results_vis_on"),
+         InlineKeyboardButton("❌ إيقاف", callback_data="qa_results_vis_off")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="qa_back_to_quiz_menu")],
+    ])
+
+
+async def qa_results_vis_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     quiz_id = context.user_data.get("qa_quiz_id")
     quiz    = qs.get_quiz(quiz_id)
-    qs.update_quiz_field(quiz_id, show_score=not quiz.get("show_score", True))
-    return await _show_quiz_menu(update, context)
+    if not quiz:
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return QA_HUB
+    await _reply(update, _results_vis_text(quiz), _results_vis_kb())
+    return QA_RESULTS_VIS
+
+
+async def qa_results_vis_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("✅ تم التفعيل.")
+    quiz_id = context.user_data.get("qa_quiz_id")
+    qs.update_quiz_field(quiz_id, show_score=True)
+    await _reply(update, _results_vis_text(qs.get_quiz(quiz_id)), _results_vis_kb())
+    return QA_RESULTS_VIS
+
+
+async def qa_results_vis_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("✅ تم الإيقاف.")
+    quiz_id = context.user_data.get("qa_quiz_id")
+    qs.update_quiz_field(quiz_id, show_score=False)
+    await _reply(update, _results_vis_text(qs.get_quiz(quiz_id)), _results_vis_kb())
+    return QA_RESULTS_VIS
 
 
 async def qa_toggle_retake(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -840,7 +873,7 @@ def build_quiz_admin_handler() -> ConversationHandler:
             QA_QUIZ_MENU: [
                 CallbackQueryHandler(qa_edit_menu,        pattern="^qa_edit_menu$"),
                 CallbackQueryHandler(qa_toggle_visible,   pattern="^qa_toggle_visible$"),
-                CallbackQueryHandler(qa_toggle_score,     pattern="^qa_toggle_score$"),
+                CallbackQueryHandler(qa_results_vis_menu, pattern="^qa_results_vis_menu$"),
                 CallbackQueryHandler(qa_toggle_retake,    pattern="^qa_toggle_retake$"),
                 CallbackQueryHandler(qa_show_results,     pattern="^qa_show_results$"),
                 CallbackQueryHandler(qa_delete_confirm,   pattern="^qa_delete_confirm$"),
@@ -920,6 +953,13 @@ def build_quiz_admin_handler() -> ConversationHandler:
             QA_E_Q_DEL_CONFIRM: [
                 CallbackQueryHandler(qa_qf_delete_yes,   pattern="^qa_qf_delete_yes$"),
                 CallbackQueryHandler(qa_back_to_q_field, pattern="^qa_back_to_q_field$"),
+                hub_reentry,
+            ],
+            # ── Results visibility to participants ("👁 نتائج المتسابقين") ──
+            QA_RESULTS_VIS: [
+                CallbackQueryHandler(qa_results_vis_on,  pattern="^qa_results_vis_on$"),
+                CallbackQueryHandler(qa_results_vis_off, pattern="^qa_results_vis_off$"),
+                CallbackQueryHandler(qa_back_to_quiz_menu, pattern="^qa_back_to_quiz_menu$"),
                 hub_reentry,
             ],
         },

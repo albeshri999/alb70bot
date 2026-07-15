@@ -47,8 +47,8 @@ logger = logging.getLogger(__name__)
  DT_C_Q_TEXT, DT_C_Q_OPT_A, DT_C_Q_OPT_B, DT_C_Q_CORRECT, DT_C_Q_MORE,
  DT_EDIT_MENU, DT_E_NAME, DT_E_DESC, DT_E_POINTS, DT_E_TIMED, DT_E_MINUTES,
  DT_E_Q_LIST, DT_E_Q_FIELD_MENU, DT_E_Q_FIELD_VAL, DT_E_Q_DEL_CONFIRM,
- DT_SPLIT_SIZE, DT_SPLIT_VIEW,
- ) = range(27)
+ DT_SPLIT_SIZE, DT_SPLIT_VIEW, DT_RESULTS_VIS,
+ ) = range(28)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,6 +171,7 @@ def _quiz_menu_kb(quiz: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ تعديل", callback_data="dt_edit_menu")],
         [InlineKeyboardButton(vis, callback_data="dt_toggle_visible")],
         [InlineKeyboardButton(entry, callback_data="dt_toggle_entry")],
+        [InlineKeyboardButton("👁 نتائج المتسابقين", callback_data="dt_results_vis_menu")],
         [InlineKeyboardButton("📊 النتائج", callback_data="dt_show_results")],
         [InlineKeyboardButton("👥 تقسيم الفرق", callback_data="dt_goto_split")],
         [InlineKeyboardButton("🗑 حذف", callback_data="dt_delete_confirm")],
@@ -194,6 +195,7 @@ def _quiz_summary(quiz: dict) -> str:
         f"⏱ الوقت: *{time_line}*",
         f"👁 ظاهر للمتسابقين: *{'نعم' if quiz.get('visible') else 'لا'}*",
         f"🚪 الدخول: *{'مسموح' if ds.is_entry_open(quiz) else 'ممنوع'}*",
+        f"👁 نتائج المتسابقين: *{'ظاهرة' if ds.is_results_visible(quiz) else 'مخفية'}*",
         f"✅ عدد من أنهى الاختبار: *{n_results}*",
     ]
     return "\n".join(lines)
@@ -228,6 +230,47 @@ async def dt_toggle_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz    = ds.get_quiz(quiz_id)
     ds.set_entry_open(quiz_id, not ds.is_entry_open(quiz))
     return await _show_quiz_menu(update, context)
+
+
+def _results_vis_text(quiz: dict) -> str:
+    status = ("✅ إظهار النتائج للمتسابقين" if ds.is_results_visible(quiz)
+              else "❌ إخفاء النتائج عن المتسابقين")
+    return f"👁 *نتائج المتسابقين*\n\nالحالة الحالية:\n{status}"
+
+
+def _results_vis_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تفعيل", callback_data="dt_results_vis_on"),
+         InlineKeyboardButton("❌ إيقاف", callback_data="dt_results_vis_off")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="dt_back_to_quiz_menu")],
+    ])
+
+
+async def dt_results_vis_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    quiz_id = context.user_data.get("dt_quiz_id")
+    quiz    = ds.get_quiz(quiz_id)
+    if not quiz:
+        await _reply(update, "⚠️ لم يعد هذا الاختبار موجوداً.", _hub_kb())
+        return DT_HUB
+    await _reply(update, _results_vis_text(quiz), _results_vis_kb())
+    return DT_RESULTS_VIS
+
+
+async def dt_results_vis_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("✅ تم التفعيل.")
+    quiz_id = context.user_data.get("dt_quiz_id")
+    ds.update_quiz_field(quiz_id, show_score=True)
+    await _reply(update, _results_vis_text(ds.get_quiz(quiz_id)), _results_vis_kb())
+    return DT_RESULTS_VIS
+
+
+async def dt_results_vis_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("✅ تم الإيقاف.")
+    quiz_id = context.user_data.get("dt_quiz_id")
+    ds.update_quiz_field(quiz_id, show_score=False)
+    await _reply(update, _results_vis_text(ds.get_quiz(quiz_id)), _results_vis_kb())
+    return DT_RESULTS_VIS
 
 
 async def dt_goto_split(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -873,6 +916,7 @@ def build_distro_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(dt_edit_menu,          pattern="^dt_edit_menu$"),
                 CallbackQueryHandler(dt_toggle_visible,     pattern="^dt_toggle_visible$"),
                 CallbackQueryHandler(dt_toggle_entry,       pattern="^dt_toggle_entry$"),
+                CallbackQueryHandler(dt_results_vis_menu,   pattern="^dt_results_vis_menu$"),
                 CallbackQueryHandler(dt_show_results,       pattern="^dt_show_results$"),
                 CallbackQueryHandler(dt_goto_split,         pattern="^dt_goto_split$"),
                 CallbackQueryHandler(dt_delete_confirm,     pattern="^dt_delete_confirm$"),
@@ -959,6 +1003,13 @@ def build_distro_admin_handler() -> ConversationHandler:
             DT_SPLIT_VIEW: [
                 CallbackQueryHandler(dt_export_teams, pattern="^dt_export_teams$"),
                 CallbackQueryHandler(dt_resplit,      pattern="^dt_resplit$"),
+                hub_reentry,
+            ],
+            # ── Results visibility to participants ("👁 نتائج المتسابقين") ──
+            DT_RESULTS_VIS: [
+                CallbackQueryHandler(dt_results_vis_on,  pattern="^dt_results_vis_on$"),
+                CallbackQueryHandler(dt_results_vis_off, pattern="^dt_results_vis_off$"),
+                CallbackQueryHandler(dt_back_to_quiz_menu, pattern="^dt_back_to_quiz_menu$"),
                 hub_reentry,
             ],
         },
