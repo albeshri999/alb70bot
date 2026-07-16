@@ -124,14 +124,14 @@ async def sb_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SB_HUB
 
 
-# ── Channel setup ("📺 ربط قناة المشاركات") — Telegram Request Chat API ─────
+# ── Channel management ("📺 قناة المشاركات") — Telegram Request Chat API ────
 #
-# The ONLY way to link a channel: tapping "📲 اختيار قناة" opens Telegram's
-# own native chat picker (KeyboardButtonRequestChat) restricted to channels
-# where the admin themself has admin rights and where our bot is already a
-# member. Telegram sends back the chosen chat's id (and title, since we set
-# request_title=True) automatically — no forwarding, no /link command, and
-# no manual chat-id entry anywhere in this flow.
+# Linking uses ONLY Telegram's native chat picker (KeyboardButtonRequestChat)
+# — tapping "📲 اختيار قناة" opens it, restricted to channels where our bot
+# is already a member. No forwarding, no /link command, no manual chat-id
+# entry anywhere in this flow. Once linked, this section is a full
+# management page: live status, a test send, resending anything that failed
+# to reach the channel, changing channel, and unlinking.
 
 CHANNEL_REQUEST_ID = 1
 
@@ -139,8 +139,11 @@ CHANNEL_REQUEST_ID = 1
 def _channel_menu_kb() -> InlineKeyboardMarkup:
     rows = []
     if subs.is_channel_configured():
-        rows.append([InlineKeyboardButton("ℹ️ معلومات القناة", callback_data="sb_channel_info")])
-        rows.append([InlineKeyboardButton("📲 ربط قناة أخرى", callback_data="sb_channel_request")])
+        rows.append([InlineKeyboardButton("📤 اختبار القناة", callback_data="sb_channel_test")])
+        if subs.pending_resend_entries():
+            rows.append([InlineKeyboardButton("🔄 إعادة إرسال المشاركات المعلقة",
+                                                callback_data="sb_channel_resend")])
+        rows.append([InlineKeyboardButton("🔄 تغيير القناة", callback_data="sb_channel_request")])
         rows.append([InlineKeyboardButton("🗑 إلغاء ربط القناة", callback_data="sb_channel_unlink")])
     else:
         rows.append([InlineKeyboardButton("📲 ربط قناة المشاركات", callback_data="sb_channel_request")])
@@ -148,19 +151,50 @@ def _channel_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _yesno(v):
+    if v is None:
+        return "❓ غير معروف"
+    return "✅ نعم" if v else "❌ لا"
+
+
 async def _show_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if subs.is_channel_configured():
-        text = (
-            f"📺 *قناة المشاركات*\n\n"
-            f"القناة المرتبطة حالياً: *{subs.get_channel_title()}*"
-        )
-    else:
+    if not subs.is_channel_configured():
         text = (
             "📺 *ربط قناة المشاركات*\n\n"
             "1️⃣ أنشئ قناة خاصة أو عامة.\n"
             "2️⃣ أضف البوت كمشرف (Admin) فيها مع صلاحية إرسال الرسائل.\n"
             "3️⃣ اضغط الزر أدناه واختر القناة من نافذة تيليجرام."
         )
+        await _reply(update, text, _channel_menu_kb())
+        return SB_CHANNEL_MENU
+
+    channel_id = subs.get_channel_id()
+    is_admin_there, can_post, connected = None, None, True
+    try:
+        member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        status = getattr(member, "status", None)
+        is_admin_there = status in ("administrator", "creator")
+        can_post = status == "creator" or getattr(member, "can_post_messages", False)
+    except Exception as e:
+        logger.warning("_show_channel_menu: could not check bot status: %s", e)
+        connected = False
+
+    pending_count = len(subs.pending_resend_entries())
+    sent_count = subs.count_entries_for_channel(channel_id)
+
+    text = (
+        f"📺 *إدارة قناة المشاركات*\n\n"
+        f"📺 اسم القناة: *{subs.get_channel_title()}*\n"
+        f"🆔 معرف القناة: `{channel_id}`\n"
+        f"📅 تاريخ الربط: {_fmt_date(subs.get_channel_linked_at())}\n"
+        f"🟢 حالة الاتصال: {'✅ متصلة' if connected else '❌ تعذّر الاتصال'}\n"
+        f"🤖 حالة البوت: {'✅ مشرف' if is_admin_there else '❌ ليس مشرفاً'}\n"
+        f"✉️ صلاحية إرسال الرسائل: {_yesno(can_post)}\n"
+        f"📤 عدد المشاركات المرسلة: *{sent_count}*"
+    )
+    if pending_count:
+        text += f"\n⏳ مشاركات بانتظار إعادة الإرسال: *{pending_count}*"
+
     await _reply(update, text, _channel_menu_kb())
     return SB_CHANNEL_MENU
 
@@ -168,6 +202,100 @@ async def _show_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def sb_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     return await _show_channel_menu(update, context)
+
+
+async def sb_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ok, reason = await subs.check_channel_status(context.bot)
+    if not ok:
+        await _reply(
+            update, f"⚠️ تعذر إرسال رسالة الاختبار.\n\nالسبب:\n{reason}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]),
+        )
+        return SB_CHANNEL_MENU
+
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    test_text = (
+        "━━━━━━━━━━━━━━\n\n"
+        "✅ تم اختبار قناة المشاركات بنجاح.\n\n"
+        "إذا وصلت هذه الرسالة فإن الربط يعمل بصورة صحيحة.\n\n"
+        f"📅 وقت الاختبار:\n{now_str}\n\n"
+        "━━━━━━━━━━━━━━"
+    )
+    try:
+        await context.bot.send_message(chat_id=subs.get_channel_id(), text=test_text)
+        await _reply(
+            update, "✅ تم إرسال رسالة الاختبار بنجاح.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]),
+        )
+    except Exception as e:
+        logger.warning("sb_channel_test: send failed: %s", e)
+        await _reply(
+            update, "⚠️ تعذر إرسال رسالة الاختبار رغم اجتياز التحقق. حاول مجدداً.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]),
+        )
+    return SB_CHANNEL_MENU
+
+
+async def sb_channel_resend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    pending = subs.pending_resend_entries()
+    if not pending:
+        return await _show_channel_menu(update, context)
+
+    ok, reason = await subs.check_channel_status(context.bot)
+    if not ok:
+        await _reply(
+            update, f"⚠️ تعذر إرسال المشاركات المعلقة.\n\nالسبب:\n{reason}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]),
+        )
+        return SB_CHANNEL_MENU
+
+    channel_id = subs.get_channel_id()
+    sent_count, failed_count = 0, 0
+    for entry in pending:
+        submission = subs.get_submission(entry.get("submission_id"))
+        if not submission:
+            continue
+        media_type = entry.get("file_type")
+        judge_id = entry.get("judge_id")
+        hide_names = submission.get("hide_names")
+        identity_line = (
+            f"🎖 المتسابق رقم: {judge_id}" if hide_names
+            else f"👤 اسم المتسابق: {entry.get('user_name', '—')}\n🆔 معرف المتسابق: {entry.get('user_id')}"
+        )
+        caption = (
+            f"🏆 {submission.get('name')}\n\n"
+            f"{identity_line}\n"
+            f"📅 {_fmt_date(entry.get('submitted_at'))}\n"
+            f"🏷 نوع المشاركة: {subs.MEDIA_TYPES.get(media_type, '—')}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⭐ تقييم", callback_data=f"chsb_score_{entry['submission_id']}_{entry['user_id']}"),
+             InlineKeyboardButton("🏆 اعتماد", callback_data=f"chsb_approve_{entry['submission_id']}_{entry['user_id']}")],
+            [InlineKeyboardButton("❌ رفض", callback_data=f"chsb_reject_{entry['submission_id']}_{entry['user_id']}"),
+             InlineKeyboardButton("🗑 حذف", callback_data=f"chsb_delete_{entry['submission_id']}_{entry['user_id']}")],
+        ])
+        try:
+            file_id = entry.get("pending_file_id")
+            if media_type == "audio":
+                sent = await context.bot.send_voice(chat_id=channel_id, voice=file_id, caption=caption, reply_markup=kb)
+            elif media_type == "video":
+                sent = await context.bot.send_video(chat_id=channel_id, video=file_id, caption=caption, reply_markup=kb)
+            else:
+                sent = await context.bot.send_photo(chat_id=channel_id, photo=file_id, caption=caption, reply_markup=kb)
+            subs.mark_entry_sent(entry["submission_id"], entry["user_id"], channel_id, sent.message_id)
+            sent_count += 1
+        except Exception as e:
+            logger.warning("resend failed for entry %s/%s: %s", entry.get("submission_id"), entry.get("user_id"), e)
+            failed_count += 1
+
+    await _reply(
+        update,
+        f"✅ تم إرسال *{sent_count}* مشاركة.\n" + (f"⚠️ ما زال *{failed_count}* بانتظار الإرسال." if failed_count else ""),
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]),
+    )
+    return SB_CHANNEL_MENU
 
 
 async def sb_channel_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,10 +359,16 @@ async def sb_channel_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_id and str(current_id) != str(channel_id):
         context.user_data["sb_pending_channel"] = (channel_id, title)
         await update.message.reply_text(
-            f"⚠️ توجد قناة مرتبطة بالفعل: *{subs.get_channel_title()}*.\n\n"
-            "هل تريد استبدالها بهذه القناة؟",
+            f"تم اختيار قناة جديدة: *{title}*\n\n"
+            f"توجد قناة مرتبطة بالفعل: *{subs.get_channel_title()}*.\n\n"
+            "هل تريد استخدام القناة الجديدة للمشاركات المستقبلية فقط، "
+            "أم استبدال القناة الحالية بالكامل؟",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=_yn("sb_channel_replace_yes", "sb_channel_replace_no"),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔮 المستقبلية فقط", callback_data="sb_channel_change_future")],
+                [InlineKeyboardButton("🔁 استبدال كامل", callback_data="sb_channel_change_full")],
+                [InlineKeyboardButton("❌ إلغاء", callback_data="sb_channel_replace_no")],
+            ]),
         )
         return SB_CHANNEL_REPLACE_CONFIRM
 
@@ -246,18 +380,41 @@ async def sb_channel_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SB_HUB
 
 
-async def sb_channel_replace_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+async def _apply_channel_change(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str):
+    """Both options switch which channel NEW submissions go to from now on
+    (settings.channel_id/title). The distinction is informational: past
+    entries already carry their OWN channel_id/message_id independently, so
+    they keep pointing to wherever they were actually sent regardless of
+    this choice — 'المستقبلية فقط' simply acknowledges that explicitly,
+    while 'استبدال كامل' treats the new channel as the sole channel going
+    forward. Note: fully migrating already-sent media to a new channel isn't
+    possible, since (by design) successfully-sent entries keep only a
+    channel message reference, not the original file id."""
     channel_id, title = context.user_data.pop("sb_pending_channel", (None, None))
     if not channel_id:
         return await _show_channel_menu(update, context)
     subs.link_channel(channel_id, title)
+    note = (
+        "✅ سيتم إرسال المشاركات الجديدة إلى القناة الجديدة من الآن فصاعداً."
+        if mode == "future" else
+        "✅ تم استبدال القناة بالكامل."
+    )
     await _reply(
         update,
-        f"✅ تم ربط قناة المشاركات بنجاح.\n\nاسم القناة:\n{title}\n\nمعرف القناة:\n{channel_id}",
+        f"{note}\n\nاسم القناة:\n{title}\n\nمعرف القناة:\n{channel_id}",
         _hub_kb(),
     )
     return SB_HUB
+
+
+async def sb_channel_change_future(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _apply_channel_change(update, context, "future")
+
+
+async def sb_channel_change_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _apply_channel_change(update, context, "full")
 
 
 async def sb_channel_replace_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,46 +423,14 @@ async def sb_channel_replace_no(update: Update, context: ContextTypes.DEFAULT_TY
     return await _show_channel_menu(update, context)
 
 
-async def sb_channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    channel_id = subs.get_channel_id()
-    if not channel_id:
-        return await _show_channel_menu(update, context)
-
-    is_admin_there = None
-    can_post = None
-    try:
-        member = await context.bot.get_chat_member(channel_id, context.bot.id)
-        status = getattr(member, "status", None)
-        is_admin_there = status in ("administrator", "creator")
-        can_post = status == "creator" or getattr(member, "can_post_messages", False)
-    except Exception as e:
-        logger.warning("sb_channel_info: could not check bot status: %s", e)
-
-    def _yesno(v):
-        if v is None:
-            return "❓ غير معروف"
-        return "✅ نعم" if v else "❌ لا"
-
-    text = (
-        f"ℹ️ *معلومات القناة*\n\n"
-        f"📺 الاسم: *{subs.get_channel_title()}*\n"
-        f"🆔 المعرف: `{channel_id}`\n"
-        f"📅 تاريخ الربط: {_fmt_date(subs.get_channel_linked_at())}\n"
-        f"👮 البوت مشرف؟ {_yesno(is_admin_there)}\n"
-        f"✉️ يستطيع إرسال الرسائل؟ {_yesno(can_post)}"
-    )
-    await _reply(update, text, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]))
-    return SB_CHANNEL_MENU
-
-
 async def sb_channel_unlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     if not subs.is_channel_configured():
         return await _show_channel_menu(update, context)
     await _reply(
         update,
-        f"🗑 هل أنت متأكد من إلغاء ربط قناة *{subs.get_channel_title()}*؟",
+        f"🗑 هل أنت متأكد من إلغاء ربط قناة *{subs.get_channel_title()}*؟\n\n"
+        "لن يتم قبول أي مشاركات جديدة حتى يتم ربط قناة أخرى.",
         _yn("sb_channel_unlink_yes", "sb_channel"),
     )
     return SB_CHANNEL_UNLINK_CONFIRM
@@ -765,6 +890,8 @@ async def sb_vis_hide(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _entry_status_label(entry: dict) -> str:
     status = entry.get("status")
+    if status == subs.ENTRY_STATUS_PENDING_RESEND:
+        return "⏳ بانتظار إعادة الإرسال"
     if status == subs.ENTRY_STATUS_WINNER:
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(entry.get("rank"), "🏆")
         return f"{medal} فائز (المركز {entry.get('rank')})"
@@ -838,13 +965,16 @@ async def sb_entry_sel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _show_entries_list(update, context)
 
     identity = subs.display_identity(entry, submission)
-    link = subs.channel_message_link(entry.get("channel_id"), entry.get("message_id"))
+    if entry.get("channel_id") and entry.get("message_id"):
+        link_line = f"📺 المرفق محفوظ في قناة المشاركات: {subs.channel_message_link(entry.get('channel_id'), entry.get('message_id'))}"
+    else:
+        link_line = "⏳ لم يتم إرسال المرفق إلى القناة بعد."
     text = (
         f"🎭 المشاركة: *{submission.get('name')}*\n"
         f"👤 {identity}\n"
         f"📅 وقت الإرسال: {_fmt_date(entry.get('submitted_at'))}\n"
         f"📎 نوع المرفق: *{subs.MEDIA_TYPES.get(entry.get('file_type'), '—')}*\n"
-        f"📺 المرفق محفوظ في قناة المشاركات: {link}\n"
+        f"{link_line}\n"
         f"الحالة: {_entry_status_label(entry)}\n"
         f"💯 الدرجة الحالية: *{entry.get('score') if entry.get('score') is not None else '—'}* "
         f"من *{submission.get('max_score', 0)}*"
@@ -1170,7 +1300,8 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_channel,  pattern="^sb_channel$"),
             ],
             SB_CHANNEL_MENU: [
-                CallbackQueryHandler(sb_channel_info,    pattern="^sb_channel_info$"),
+                CallbackQueryHandler(sb_channel_test,    pattern="^sb_channel_test$"),
+                CallbackQueryHandler(sb_channel_resend,  pattern="^sb_channel_resend$"),
                 CallbackQueryHandler(sb_channel_request, pattern="^sb_channel_request$"),
                 CallbackQueryHandler(sb_channel_unlink,  pattern="^sb_channel_unlink$"),
                 CallbackQueryHandler(sb_channel,         pattern="^sb_channel$"),
@@ -1186,8 +1317,9 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 hub_reentry,
             ],
             SB_CHANNEL_REPLACE_CONFIRM: [
-                CallbackQueryHandler(sb_channel_replace_yes, pattern="^sb_channel_replace_yes$"),
-                CallbackQueryHandler(sb_channel_replace_no,  pattern="^sb_channel_replace_no$"),
+                CallbackQueryHandler(sb_channel_change_future, pattern="^sb_channel_change_future$"),
+                CallbackQueryHandler(sb_channel_change_full,   pattern="^sb_channel_change_full$"),
+                CallbackQueryHandler(sb_channel_replace_no,    pattern="^sb_channel_replace_no$"),
                 hub_reentry,
             ],
             SB_LIST: [

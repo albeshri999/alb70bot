@@ -44,6 +44,7 @@ ENTRY_STATUS_ACCEPTED   = "accepted"    # ⭐ reviewed/valid, awaiting scoring
 ENTRY_STATUS_REJECTED   = "rejected"    # ❌ disqualified — never wins, never thanked
 ENTRY_STATUS_WINNER     = "winner"
 ENTRY_STATUS_PARTICIPANT = "participant"
+ENTRY_STATUS_PENDING_RESEND = "pending_resend"  # ⏳ channel send failed — file kept for retry
 
 
 def _load_json(filepath: str, default):
@@ -279,13 +280,19 @@ def display_identity(entry: dict, submission: dict) -> str:
 
 
 def create_or_replace_entry(submission_id, user_id, user_name: str, submission_name: str,
-                             channel_id, message_id, media_type: str) -> dict:
-    """Adds a new entry — storing only a REFERENCE to the file already
-    forwarded into the submissions channel (channel_id + message_id), never
-    the file itself — replacing (deleting) any previous entry by the same
-    user for the same submission ('يحذف المشاركة السابقة ويحتفظ بآخر واحدة
-    فقط'). Preserves the same anonymous judge_id across a replacement so a
-    participant's identity stays consistently hidden/labeled throughout."""
+                             channel_id, message_id, media_type: str,
+                             pending_file_id: str = None) -> dict:
+    """Adds a new entry — normally storing only a REFERENCE to the file
+    already forwarded into the submissions channel (channel_id + message_id),
+    never the file itself — replacing (deleting) any previous entry by the
+    same user for the same submission ('يحذف المشاركة السابقة ويحتفظ بآخر
+    واحدة فقط'). Preserves the same anonymous judge_id across a replacement
+    so a participant's identity stays consistently hidden/labeled throughout.
+
+    If the channel forward failed, pass channel_id=None, message_id=None,
+    and pending_file_id=<the raw file id> instead — the ONLY case where a
+    file reference is kept in the database, and only temporarily until
+    resend_pending_entries() succeeds (see mark_entry_sent())."""
     entries = load_entries()
     key, uid = str(submission_id), str(user_id)
     existing = next((e for e in entries if str(e.get("submission_id")) == key
@@ -301,15 +308,75 @@ def create_or_replace_entry(submission_id, user_id, user_name: str, submission_n
         "judge_id": judge_id,
         "channel_id": channel_id,
         "message_id": message_id,
+        "pending_file_id": pending_file_id,
         "file_type": media_type,
         "submitted_at": datetime.utcnow().isoformat(),
         "score": None,
         "rank": None,
-        "status": ENTRY_STATUS_SUBMITTED,
+        "status": ENTRY_STATUS_PENDING_RESEND if pending_file_id else ENTRY_STATUS_SUBMITTED,
     }
     entries.append(entry)
     save_entries(entries)
     return entry
+
+
+def mark_entry_sent(submission_id, user_id, channel_id, message_id) -> bool:
+    """Upgrades a pending ('⏳ بانتظار إعادة الإرسال') entry to a normal sent
+    one once resend_pending_entries() succeeds — clears the temporarily-kept
+    file id, since the channel message reference is now the source of truth."""
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    changed = False
+    for e in entries:
+        if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
+            e["channel_id"] = channel_id
+            e["message_id"] = message_id
+            e["pending_file_id"] = None
+            e["status"] = ENTRY_STATUS_SUBMITTED
+            changed = True
+            break
+    if changed:
+        save_entries(entries)
+    return changed
+
+
+def pending_resend_entries() -> list:
+    """Every entry whose channel forward previously failed and is still
+    waiting to be retried — see '🔄 إعادة إرسال المشاركات المعلقة'."""
+    out = [e for e in load_entries() if e.get("status") == ENTRY_STATUS_PENDING_RESEND]
+    return sorted(out, key=lambda e: e.get("submitted_at", ""))
+
+
+def count_entries_for_channel(channel_id) -> int:
+    """How many entries currently reference the given channel — used for
+    '📤 عدد المشاركات المرسلة' on the channel management page."""
+    cid = str(channel_id)
+    return sum(1 for e in load_entries() if str(e.get("channel_id")) == cid)
+
+
+async def check_channel_status(bot):
+    """Verifies the linked channel still exists, the bot is still an admin
+    there, and can still post messages — called before EVERY forward to the
+    channel, and also shown live on the channel management page. Returns
+    (ok: bool, reason: str) — reason is empty when ok is True."""
+    channel_id = get_channel_id()
+    if not channel_id:
+        return False, "لا توجد قناة مرتبطة بنظام المشاركات."
+    try:
+        await bot.get_chat(channel_id)
+    except Exception:
+        return False, "القناة المرتبطة لم تعد موجودة أو تعذّر الوصول إليها."
+    try:
+        member = await bot.get_chat_member(channel_id, bot.id)
+    except Exception:
+        return False, "تعذّر التحقق من صلاحيات البوت داخل قناة المشاركات."
+    status = getattr(member, "status", None)
+    if status not in ("administrator", "creator"):
+        return False, "البوت لم يعد مشرفاً داخل قناة المشاركات."
+    can_post = status == "creator" or getattr(member, "can_post_messages", False)
+    if not can_post:
+        return False, "البوت لا يملك صلاحية إرسال الرسائل داخل قناة المشاركات."
+    return True, ""
 
 
 def delete_entry(submission_id, user_id) -> bool:

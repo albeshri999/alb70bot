@@ -147,7 +147,9 @@ async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_
     currently expected to upload for a specific submission (never touches
     any other message flow in the bot). Forwards the file straight into the
     '📺 قناة المشاركات' channel and stores only that channel message's
-    reference — the bot itself never keeps the file."""
+    reference — the bot itself never keeps the file, EXCEPT temporarily if
+    the forward fails (see the pending-resend fallback below), so a
+    submission is never lost even when the channel link is broken."""
     submission_id = context.user_data.get(PENDING_KEY)
     if not submission_id:
         return
@@ -183,17 +185,10 @@ async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("⚠️ لقد أرسلت مشاركتك مسبقاً ولا يمكن تعديلها.")
         return
 
-    channel_id = subs.get_channel_id()
-    if not channel_id:
-        context.user_data.pop(PENDING_KEY, None)
-        await message.reply_text(
-            "⚠️ لم يتم إعداد قناة استقبال المشاركات بعد. يرجى إبلاغ المشرف والمحاولة لاحقاً."
-        )
-        return
-
     from storage import get_user
     user = get_user(user_id) or {}
     full_name = user.get("full_name") or (update.effective_user.full_name if update.effective_user else "—")
+    context.user_data.pop(PENDING_KEY, None)
 
     # Same anonymous judging id is kept across a replacement.
     judge_id = old_entry.get("judge_id") if old_entry else subs.next_judge_id(submission_id)
@@ -210,39 +205,65 @@ async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_
     )
     channel_kb = _channel_moderation_kb(submission_id, user_id)
 
-    try:
-        if media_type == "audio":
-            sent = await context.bot.send_voice(chat_id=channel_id, voice=file_id,
-                                                 caption=caption, reply_markup=channel_kb)
-        elif media_type == "video":
-            sent = await context.bot.send_video(chat_id=channel_id, video=file_id,
-                                                 caption=caption, reply_markup=channel_kb)
-        else:
-            sent = await context.bot.send_photo(chat_id=channel_id, photo=file_id,
-                                                 caption=caption, reply_markup=channel_kb)
-    except Exception as e:
-        logger.error("failed to forward submission to channel: %s", e)
-        context.user_data.pop(PENDING_KEY, None)
-        await message.reply_text("⚠️ تعذر إرسال مشاركتك حالياً. يرجى إبلاغ المشرف والمحاولة لاحقاً.")
+    ok, reason = await subs.check_channel_status(context.bot)
+    sent = None
+    if ok:
+        channel_id = subs.get_channel_id()
+        try:
+            if media_type == "audio":
+                sent = await context.bot.send_voice(chat_id=channel_id, voice=file_id,
+                                                     caption=caption, reply_markup=channel_kb)
+            elif media_type == "video":
+                sent = await context.bot.send_video(chat_id=channel_id, video=file_id,
+                                                     caption=caption, reply_markup=channel_kb)
+            else:
+                sent = await context.bot.send_photo(chat_id=channel_id, photo=file_id,
+                                                     caption=caption, reply_markup=channel_kb)
+        except Exception as e:
+            logger.error("failed to forward submission to channel: %s", e)
+            reason = "تعذّر إرسال المشاركة إلى القناة."
+
+    if sent is not None:
+        # Replacing a previous entry — remove its old channel message so the
+        # channel only ever shows the participant's latest submission. Only
+        # done once the NEW send actually succeeded, so a failed replacement
+        # never leaves the participant with nothing in the channel.
+        if old_entry and old_entry.get("channel_id") and old_entry.get("message_id"):
+            try:
+                await context.bot.delete_message(chat_id=old_entry["channel_id"], message_id=old_entry["message_id"])
+            except Exception as e:
+                logger.warning("failed to delete replaced channel message: %s", e)
+
+        subs.create_or_replace_entry(
+            submission_id, user_id, full_name, submission.get("name", "—"),
+            subs.get_channel_id(), sent.message_id, media_type,
+        )
+        await message.reply_text("✅ تم استلام مشاركتك بنجاح. بالتوفيق!")
         return
 
-    # Replacing a previous entry — remove its old channel message so the
-    # channel only ever shows the participant's latest submission.
-    if old_entry and old_entry.get("channel_id") and old_entry.get("message_id"):
-        try:
-            await context.bot.delete_message(chat_id=old_entry["channel_id"], message_id=old_entry["message_id"])
-        except Exception as e:
-            logger.warning("failed to delete replaced channel message: %s", e)
-
+    # Channel unavailable right now — the submission is NEVER discarded: it's
+    # saved as '⏳ بانتظار إعادة الإرسال' with its file id kept temporarily,
+    # and every admin is notified so they can retry via
+    # '🔄 إعادة إرسال المشاركات المعلقة'.
+    logger.warning("submission channel unavailable (%s) — saving as pending_resend", reason)
     subs.create_or_replace_entry(
         submission_id, user_id, full_name, submission.get("name", "—"),
-        channel_id, sent.message_id, media_type,
+        None, None, media_type, pending_file_id=file_id,
     )
-    # Preserve the assigned judge_id explicitly (create_or_replace_entry
-    # already reuses old_entry's judge_id automatically when present, but
-    # for a brand-new entry it assigns its own — nothing further needed).
-    context.user_data.pop(PENDING_KEY, None)
     await message.reply_text("✅ تم استلام مشاركتك بنجاح. بالتوفيق!")
+
+    try:
+        import admins_store
+        for admin_id in admins_store.all_admin_ids():
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"⚠️ توجد مشاركة لم يتم إرسالها إلى القناة.\n\nالسبب:\n{reason}",
+                )
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning("failed to notify admins about pending submission: %s", e)
 
 
 def _channel_moderation_kb(submission_id, user_id) -> InlineKeyboardMarkup:
