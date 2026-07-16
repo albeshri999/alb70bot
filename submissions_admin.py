@@ -258,24 +258,10 @@ async def sb_channel_resend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not submission:
             continue
         media_type = entry.get("file_type")
-        judge_id = entry.get("judge_id")
-        hide_names = submission.get("hide_names")
-        identity_line = (
-            f"🎖 المتسابق رقم: {judge_id}" if hide_names
-            else f"👤 اسم المتسابق: {entry.get('user_name', '—')}\n🆔 معرف المتسابق: {entry.get('user_id')}"
-        )
-        caption = (
-            f"🏆 {submission.get('name')}\n\n"
-            f"{identity_line}\n"
-            f"📅 {_fmt_date(entry.get('submitted_at'))}\n"
-            f"🏷 نوع المشاركة: {subs.MEDIA_TYPES.get(media_type, '—')}"
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⭐ تقييم", callback_data=f"chsb_score_{entry['submission_id']}_{entry['user_id']}"),
-             InlineKeyboardButton("🏆 اعتماد", callback_data=f"chsb_approve_{entry['submission_id']}_{entry['user_id']}")],
-            [InlineKeyboardButton("❌ رفض", callback_data=f"chsb_reject_{entry['submission_id']}_{entry['user_id']}"),
-             InlineKeyboardButton("🗑 حذف", callback_data=f"chsb_delete_{entry['submission_id']}_{entry['user_id']}")],
-        ])
+        caption_entry = dict(entry)
+        caption_entry["status"] = subs.ENTRY_STATUS_SUBMITTED  # what it becomes once sent
+        caption = subs.build_channel_caption(submission, caption_entry)
+        kb = _channel_action_kb(entry["submission_id"], entry["user_id"])
         try:
             file_id = entry.get("pending_file_id")
             if media_type == "audio":
@@ -1156,6 +1142,14 @@ async def sb_fin_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # messages posted in the submissions channel, which isn't part of any
 # per-chat conversation state. Each one re-checks admin permission itself
 # since the channel buttons are visible to anyone who can see the post.
+#
+# Every entry has EXACTLY one status at any time (see ENTRY_STATUS_LABELS in
+# submissions_storage.py): 🟡 بانتظار التقييم / ⭐ تم التقييم / 🏆 معتمدة /
+# ❌ مرفوضة / 🗑 محذوفة. Scoring always sets '⭐ تم التقييم' outright — it
+# never also marks the entry approved. "🏆 اعتماد" and "❌ رفض" only ever
+# change the status after the admin explicitly confirms via "✅ نعم" (never
+# immediately on the first tap), and every status change is written by
+# EDITING the same channel card (caption + buttons) — never a new message.
 
 CHSB_PENDING_SCORE_KEY = "chsb_pending_score"  # (submission_id, user_id) tuple
 
@@ -1164,6 +1158,42 @@ def _parse_chsb_payload(data: str, prefix: str):
     payload = data.replace(prefix, "")
     submission_id, user_id = payload.split("_", 1)
     return submission_id, user_id
+
+
+def _channel_action_kb(submission_id, user_id) -> InlineKeyboardMarkup:
+    """The normal 4-button layout shown on every active (non-deleted) card."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ تقييم", callback_data=f"chsb_score_{submission_id}_{user_id}"),
+         InlineKeyboardButton("🏆 اعتماد", callback_data=f"chsb_approve_{submission_id}_{user_id}")],
+        [InlineKeyboardButton("❌ رفض", callback_data=f"chsb_reject_{submission_id}_{user_id}"),
+         InlineKeyboardButton("🗑 حذف", callback_data=f"chsb_delete_{submission_id}_{user_id}")],
+    ])
+
+
+def _channel_confirm_kb(kind: str, submission_id, user_id) -> InlineKeyboardMarkup:
+    yes_label = {"approve": "✅ نعم", "reject": "✅ نعم", "delete": "🗑 نعم، حذف"}[kind]
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(yes_label, callback_data=f"chsb_{kind}_yes_{submission_id}_{user_id}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data=f"chsb_cancel_{submission_id}_{user_id}"),
+    ]])
+
+
+async def _update_channel_card(context, submission_id, user_id, keyboard=None):
+    """Edits the SAME channel message's caption (and optionally its
+    keyboard) to reflect the entry's current status — never sends a new
+    message."""
+    entry = subs.get_entry(submission_id, user_id)
+    submission = subs.get_submission(submission_id)
+    if not entry or not submission or not entry.get("channel_id") or not entry.get("message_id"):
+        return
+    caption = subs.build_channel_caption(submission, entry)
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=entry["channel_id"], message_id=entry["message_id"],
+            caption=caption, reply_markup=keyboard,
+        )
+    except Exception as e:
+        logger.warning("_update_channel_card failed for %s/%s: %s", submission_id, user_id, e)
 
 
 async def chsb_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1218,62 +1248,125 @@ async def chsb_score_dm_value(update: Update, context: ContextTypes.DEFAULT_TYPE
     if score == int(score):
         score = int(score)
 
-    subs.set_entry_score(submission_id, user_id, score)
+    subs.set_entry_score(submission_id, user_id, score)  # always → ⭐ تم التقييم
     context.user_data.pop(CHSB_PENDING_SCORE_KEY, None)
+    await _update_channel_card(context, submission_id, user_id, _channel_action_kb(submission_id, user_id))
     await update.message.reply_text(f"✅ تم تسجيل الدرجة: *{score}* من *{max_score}*", parse_mode=ParseMode.MARKDOWN)
     raise ApplicationHandlerStop
 
 
 async def chsb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """First tap — only asks for confirmation, changes nothing yet."""
     query = update.callback_query
     if not _is_admin(query.from_user.id):
         await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
     submission_id, user_id = _parse_chsb_payload(query.data, "chsb_approve_")
-    subs.set_entry_status(submission_id, user_id, subs.ENTRY_STATUS_ACCEPTED)
-    await query.answer("🏆 تم اعتماد المشاركة كصالحة للتحكيم.", show_alert=True)
+    if not subs.get_entry(submission_id, user_id):
+        await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
+        return
+    await query.answer()
     try:
-        if query.message.caption:
-            await context.bot.edit_message_caption(
-                chat_id=query.message.chat_id, message_id=query.message.message_id,
-                caption=query.message.caption + "\n\n🏆 الحالة: معتمدة",
-                reply_markup=query.message.reply_markup,
-            )
+        await context.bot.edit_message_reply_markup(
+            chat_id=query.message.chat_id, message_id=query.message.message_id,
+            reply_markup=_channel_confirm_kb("approve", submission_id, user_id),
+        )
     except Exception as e:
-        logger.warning("chsb_approve caption edit failed: %s", e)
+        logger.warning("chsb_approve confirm-prompt failed: %s", e)
+
+
+async def chsb_approve_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_approve_yes_")
+    subs.approve_entry(submission_id, user_id)
+    await query.answer("🏆 تم اعتماد المشاركة.", show_alert=True)
+    await _update_channel_card(context, submission_id, user_id, _channel_action_kb(submission_id, user_id))
 
 
 async def chsb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """First tap — only asks for confirmation, changes nothing yet."""
     query = update.callback_query
     if not _is_admin(query.from_user.id):
         await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
     submission_id, user_id = _parse_chsb_payload(query.data, "chsb_reject_")
-    subs.set_entry_status(submission_id, user_id, subs.ENTRY_STATUS_REJECTED)
-    await query.answer("❌ تم رفض المشاركة.", show_alert=True)
+    if not subs.get_entry(submission_id, user_id):
+        await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
+        return
+    await query.answer()
     try:
-        if query.message.caption:
-            await context.bot.edit_message_caption(
-                chat_id=query.message.chat_id, message_id=query.message.message_id,
-                caption=query.message.caption + "\n\n❌ الحالة: مرفوضة",
-                reply_markup=query.message.reply_markup,
-            )
+        await context.bot.edit_message_reply_markup(
+            chat_id=query.message.chat_id, message_id=query.message.message_id,
+            reply_markup=_channel_confirm_kb("reject", submission_id, user_id),
+        )
     except Exception as e:
-        logger.warning("chsb_reject caption edit failed: %s", e)
+        logger.warning("chsb_reject confirm-prompt failed: %s", e)
+
+
+async def chsb_reject_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_reject_yes_")
+    subs.reject_entry(submission_id, user_id)
+    await query.answer("❌ تم رفض المشاركة.", show_alert=True)
+    await _update_channel_card(context, submission_id, user_id, _channel_action_kb(submission_id, user_id))
 
 
 async def chsb_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """First tap — only asks for confirmation, changes nothing yet."""
     query = update.callback_query
     if not _is_admin(query.from_user.id):
         await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
     submission_id, user_id = _parse_chsb_payload(query.data, "chsb_delete_")
-    subs.delete_entry(submission_id, user_id)
-    await query.answer("🗑 تم حذف المشاركة من القاعدة.", show_alert=True)
+    if not subs.get_entry(submission_id, user_id):
+        await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
+        return
+    await query.answer()
     try:
-        await query.message.delete()
+        await context.bot.edit_message_reply_markup(
+            chat_id=query.message.chat_id, message_id=query.message.message_id,
+            reply_markup=_channel_confirm_kb("delete", submission_id, user_id),
+        )
     except Exception as e:
-        logger.warning("chsb_delete channel message delete failed: %s", e)
+        logger.warning("chsb_delete confirm-prompt failed: %s", e)
+
+
+async def chsb_delete_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_delete_yes_")
+    subs.set_entry_status(submission_id, user_id, subs.ENTRY_STATUS_DELETED)
+    # Show the terminal '🗑 محذوفة' state on the card with no more actions,
+    # THEN remove the entry record itself.
+    await _update_channel_card(context, submission_id, user_id, keyboard=None)
+    subs.delete_entry(submission_id, user_id)
+    await query.answer("🗑 تم حذف المشاركة.", show_alert=True)
+
+
+async def chsb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'❌ إلغاء' on any confirmation prompt — restores the normal action
+    buttons without changing the entry's status or caption at all."""
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_cancel_")
+    await query.answer("تم الإلغاء.")
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=query.message.chat_id, message_id=query.message.message_id,
+            reply_markup=_channel_action_kb(submission_id, user_id),
+        )
+    except Exception as e:
+        logger.warning("chsb_cancel restore-keyboard failed: %s", e)
 
 
 # ── Cancel fallback ───────────────────────────────────────────────────────────

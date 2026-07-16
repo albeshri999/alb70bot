@@ -13,6 +13,7 @@ mid-upload for a specific submission. It never interferes with the
 word-competition's text-answer handler or any other message handling.
 """
 import logging
+from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -192,17 +193,16 @@ async def handle_submission_media(update: Update, context: ContextTypes.DEFAULT_
 
     # Same anonymous judging id is kept across a replacement.
     judge_id = old_entry.get("judge_id") if old_entry else subs.next_judge_id(submission_id)
-    hide_names = submission.get("hide_names")
-    identity_line = (
-        f"🎖 المتسابق رقم: {judge_id}" if hide_names
-        else f"👤 اسم المتسابق: {full_name}\n🆔 معرف المتسابق: {user_id}"
-    )
-    caption = (
-        f"🏆 {submission.get('name')}\n\n"
-        f"{identity_line}\n"
-        f"📅 {message.date.strftime('%Y-%m-%d %H:%M') if message.date else '—'}\n"
-        f"🏷 نوع المشاركة: {subs.MEDIA_TYPES.get(media_type, '—')}"
-    )
+    temp_entry = {
+        "judge_id": judge_id,
+        "user_name": full_name,
+        "user_id": user_id,
+        "submitted_at": message.date.isoformat() if message.date else datetime.utcnow().isoformat(),
+        "file_type": media_type,
+        "status": subs.ENTRY_STATUS_SUBMITTED,
+        "score": None,
+    }
+    caption = subs.build_channel_caption(submission, temp_entry)
     channel_kb = _channel_moderation_kb(submission_id, user_id)
 
     ok, reason = await subs.check_channel_status(context.bot)

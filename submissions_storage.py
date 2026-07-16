@@ -39,12 +39,28 @@ MEDIA_TYPES = {
     "photo": "📷 صورة",
 }
 
-ENTRY_STATUS_SUBMITTED  = "submitted"
-ENTRY_STATUS_ACCEPTED   = "accepted"    # ⭐ reviewed/valid, awaiting scoring
-ENTRY_STATUS_REJECTED   = "rejected"    # ❌ disqualified — never wins, never thanked
+ENTRY_STATUS_SUBMITTED  = "submitted"   # 🟡 بانتظار التقييم
+ENTRY_STATUS_SCORED     = "scored"      # ⭐ تم التقييم — set automatically once a score is entered
+ENTRY_STATUS_APPROVED   = "approved"    # 🏆 معتمدة — only after admin confirms "🏆 اعتماد"
+ENTRY_STATUS_REJECTED   = "rejected"    # ❌ مرفوضة — only after admin confirms "❌ رفض"
+ENTRY_STATUS_DELETED    = "deleted"     # 🗑 محذوفة — transient: shown on the channel card just
+                                         # before the entry record itself is actually removed
 ENTRY_STATUS_WINNER     = "winner"
 ENTRY_STATUS_PARTICIPANT = "participant"
 ENTRY_STATUS_PENDING_RESEND = "pending_resend"  # ⏳ channel send failed — file kept for retry
+
+# Every entry has EXACTLY one of these at any moment — never more than one
+# shown at once. Used for both the admin's "📥 المشاركات المرسلة" listing and
+# the channel card text (see build_channel_caption()).
+ENTRY_STATUS_LABELS = {
+    ENTRY_STATUS_PENDING_RESEND: "⏳ بانتظار إعادة الإرسال",
+    ENTRY_STATUS_SUBMITTED:      "🟡 بانتظار التقييم",
+    ENTRY_STATUS_SCORED:         "⭐ تم التقييم",
+    ENTRY_STATUS_APPROVED:       "🏆 معتمدة",
+    ENTRY_STATUS_REJECTED:       "❌ مرفوضة",
+    ENTRY_STATUS_DELETED:        "🗑 محذوفة",
+    ENTRY_STATUS_PARTICIPANT:    "🔹 مشارك",
+}
 
 
 def _load_json(filepath: str, default):
@@ -400,18 +416,23 @@ def all_entries() -> list:
 
 
 def set_entry_score(submission_id, user_id, score) -> None:
+    """Saving a score ALWAYS moves the entry to exactly '⭐ تم التقييم',
+    overriding whatever status it had before — scoring never also implies
+    approval; that only ever happens via approve_entry() after explicit
+    admin confirmation."""
     entries = load_entries()
     key, uid = str(submission_id), str(user_id)
     for e in entries:
         if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
             e["score"] = score
+            e["status"] = ENTRY_STATUS_SCORED
             break
     save_entries(entries)
 
 
 def set_entry_status(submission_id, user_id, status: str) -> None:
-    """Used by the channel's ⭐/❌ moderation buttons (accept/reject a single
-    entry before scoring/finalizing) — see submissions_admin.py."""
+    """Low-level setter — prefer approve_entry()/reject_entry() below for
+    the confirm-gated moderation actions."""
     entries = load_entries()
     key, uid = str(submission_id), str(user_id)
     for e in entries:
@@ -419,6 +440,44 @@ def set_entry_status(submission_id, user_id, status: str) -> None:
             e["status"] = status
             break
     save_entries(entries)
+
+
+def approve_entry(submission_id, user_id) -> None:
+    """🏆 معتمدة — only ever called after the admin explicitly confirms
+    '✅ نعم' on the '🏆 اعتماد' confirmation prompt."""
+    set_entry_status(submission_id, user_id, ENTRY_STATUS_APPROVED)
+
+
+def reject_entry(submission_id, user_id) -> None:
+    """❌ مرفوضة — only ever called after the admin explicitly confirms
+    '✅ نعم' on the '❌ رفض' confirmation prompt."""
+    set_entry_status(submission_id, user_id, ENTRY_STATUS_REJECTED)
+
+
+def build_channel_caption(submission: dict, entry: dict) -> str:
+    """The SINGLE canonical caption for a submission's card inside the
+    channel — used when first sending it, when resending a pending entry,
+    and every time its status changes (scored/approved/rejected/deleted),
+    so the card is always edited in place rather than re-composed ad hoc in
+    multiple places."""
+    hide_names = submission.get("hide_names")
+    if hide_names:
+        identity_line = f"🎖 المتسابق رقم: {entry.get('judge_id', '—')}"
+    else:
+        identity_line = f"👤 اسم المتسابق: {entry.get('user_name', '—')}\n🆔 معرف المتسابق: {entry.get('user_id', '—')}"
+
+    status_label = ENTRY_STATUS_LABELS.get(entry.get("status"), "—")
+    score = entry.get("score")
+    score_line = f"💯 الدرجة: {score}" if score is not None else "💯 الدرجة: —"
+
+    return (
+        f"🏆 {submission.get('name')}\n\n"
+        f"{identity_line}\n"
+        f"📅 {format_deadline(entry.get('submitted_at'))}\n"
+        f"🏷 نوع المشاركة: {MEDIA_TYPES.get(entry.get('file_type'), '—')}\n\n"
+        f"📍 الحالة: {status_label}\n"
+        f"{score_line}"
+    )
 
 
 def finalize_submission(submission_id):

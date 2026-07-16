@@ -32,7 +32,11 @@ from initiatives_user import (
 from achievements_user import handle_menu_achievements
 from submissions_admin import (
     build_submissions_admin_handler,
-    chsb_score, chsb_score_dm_value, chsb_approve, chsb_reject, chsb_delete,
+    chsb_score, chsb_score_dm_value,
+    chsb_approve, chsb_approve_yes,
+    chsb_reject, chsb_reject_yes,
+    chsb_delete, chsb_delete_yes,
+    chsb_cancel,
 )
 from submissions_user import (
     handle_menu_submissions, handle_submission_view, handle_submission_start,
@@ -62,10 +66,14 @@ def main() -> None:
     # Submissions channel moderation buttons (⭐/🏆/❌/🗑 on each channel post)
     # — registered early since they're attached to channel messages, entirely
     # outside any ConversationHandler's per-chat state.
-    app.add_handler(CallbackQueryHandler(chsb_score,   pattern=r"^chsb_score_\w+_\d+$"))
-    app.add_handler(CallbackQueryHandler(chsb_approve, pattern=r"^chsb_approve_\w+_\d+$"))
-    app.add_handler(CallbackQueryHandler(chsb_reject,  pattern=r"^chsb_reject_\w+_\d+$"))
-    app.add_handler(CallbackQueryHandler(chsb_delete,  pattern=r"^chsb_delete_\w+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_score,   pattern=r"^chsb_score_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_approve, pattern=r"^chsb_approve_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_approve_yes, pattern=r"^chsb_approve_yes_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_reject,  pattern=r"^chsb_reject_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_reject_yes, pattern=r"^chsb_reject_yes_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_delete,  pattern=r"^chsb_delete_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_delete_yes, pattern=r"^chsb_delete_yes_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_cancel,  pattern=r"^chsb_cancel_\d+_\d+$"))
 
     # Admin ConversationHandler
     app.add_handler(build_admin_handler())
