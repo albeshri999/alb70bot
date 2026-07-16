@@ -33,6 +33,7 @@ from achievements_user import handle_menu_achievements
 from submissions_admin import (
     build_submissions_admin_handler,
     chsb_score, chsb_score_dm_value, chsb_approve, chsb_reject, chsb_delete,
+    handle_link_command, sblink_replace_yes, sblink_replace_no,
 )
 from submissions_user import (
     handle_menu_submissions, handle_submission_view, handle_submission_start,
@@ -66,6 +67,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(chsb_approve, pattern=r"^chsb_approve_\w+_\d+$"))
     app.add_handler(CallbackQueryHandler(chsb_reject,  pattern=r"^chsb_reject_\w+_\d+$"))
     app.add_handler(CallbackQueryHandler(chsb_delete,  pattern=r"^chsb_delete_\w+_\d+$"))
+
+    # Submissions channel linking — /link posted INSIDE the channel itself
+    # (👥 إدارة المشاركات ⚙️ ربط قناة المشاركات). No forwarding, no manual
+    # chat-id entry: the channel post's own chat id is the discovery.
+    app.add_handler(CommandHandler("link", handle_link_command))
+    app.add_handler(CallbackQueryHandler(sblink_replace_yes, pattern=r"^sblink_replace_yes_-?\d+$"))
+    app.add_handler(CallbackQueryHandler(sblink_replace_no,  pattern="^sblink_replace_no$"))
 
     # Admin ConversationHandler
     app.add_handler(build_admin_handler())

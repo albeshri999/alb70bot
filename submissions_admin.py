@@ -51,8 +51,8 @@ logger = logging.getLogger(__name__)
  SB_VIS_MENU,
  SB_ENTRIES_LIST, SB_ENTRY_DETAIL, SB_ENTRY_SCORE,
  SB_FINALIZE_LIST, SB_FINALIZE_CONFIRM,
- SB_CHANNEL_SETUP,
- ) = range(28)
+ SB_CHANNEL_MENU, SB_CHANNEL_UNLINK_CONFIRM,
+ ) = range(29)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -120,68 +120,101 @@ async def sb_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SB_HUB
 
 
-# ── Channel setup ("📺 قناة المشاركات") ────────────────────────────────────
+# ── Channel setup ("📺 ربط قناة المشاركات") ────────────────────────────────
+#
+# Linking itself happens via handle_link_command() below (a standalone
+# function, NOT part of this ConversationHandler — it fires on a /link
+# command posted INSIDE the channel, registered globally in main.py,
+# exactly like the ⭐/🏆/❌/🗑 channel moderation buttons already do for
+# entries). This section only shows status/info/unlink screens from the
+# normal admin menu.
+
+def _channel_menu_kb() -> InlineKeyboardMarkup:
+    rows = []
+    if subs.is_channel_configured():
+        rows.append([InlineKeyboardButton("ℹ️ معلومات القناة", callback_data="sb_channel_info")])
+        rows.append([InlineKeyboardButton("🗑 إلغاء ربط القناة", callback_data="sb_channel_unlink")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="sb_hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if subs.is_channel_configured():
+        text = (
+            f"📺 *قناة المشاركات*\n\n"
+            f"القناة المرتبطة حالياً: *{subs.get_channel_title()}*\n\n"
+            "لربط قناة مختلفة، نفّذ نفس خطوات الربط داخل القناة الجديدة "
+            "(سيُطلب منك تأكيد الاستبدال)."
+        )
+    else:
+        text = (
+            "📺 *ربط قناة المشاركات*\n\n"
+            "الخطوات:\n\n"
+            "1️⃣ أنشئ قناة خاصة أو عامة.\n"
+            "2️⃣ أضف البوت كمشرف (Admin) مع صلاحية إرسال الرسائل.\n"
+            "3️⃣ ادخل إلى القناة.\n"
+            "4️⃣ أرسل الرسالة التالية داخل القناة:\n\n"
+            "`/link`\n\n"
+            "بعد ذلك سيقوم البوت باكتشاف القناة وربطها تلقائياً."
+        )
+    await _reply(update, text, _channel_menu_kb())
+    return SB_CHANNEL_MENU
+
 
 async def sb_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    return await _show_channel_menu(update, context)
+
+
+async def sb_channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
     channel_id = subs.get_channel_id()
-    if channel_id:
-        title = subs.get_channel_title() or "—"
-        text = (
-            f"📺 *قناة المشاركات*\n\n"
-            f"القناة المرتبطة حالياً: *{title}*\n"
-            f"المعرف: `{channel_id}`\n\n"
-            "لتغيير القناة، أضف البوت كمشرف في القناة الجديدة ثم أعد توجيه "
-            "(Forward) أي رسالة منها إلى هذا الخاص."
-        )
-    else:
-        text = (
-            "📺 *قناة المشاركات*\n\n"
-            "لم يتم ربط أي قناة بعد.\n\n"
-            "الخطوات:\n"
-            "1️⃣ أنشئ قناة خاصة (Private Channel).\n"
-            "2️⃣ أضف هذا البوت كمشرف (Admin) فيها.\n"
-            "3️⃣ أعد توجيه (Forward) أي رسالة من داخل القناة إلى هذا الخاص الآن."
-        )
-    await _reply(update, text, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_hub")]]))
-    return SB_CHANNEL_SETUP
+    if not channel_id:
+        return await _show_channel_menu(update, context)
 
-
-async def sb_channel_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    forwarded_chat = getattr(message, "forward_from_chat", None)
-    if not forwarded_chat or getattr(forwarded_chat, "type", None) != "channel":
-        await message.reply_text(
-            "⚠️ الرجاء إعادة توجيه (Forward) رسالة مباشرة من داخل القناة، وليس نصاً عادياً."
-        )
-        return SB_CHANNEL_SETUP
-
-    channel_id = forwarded_chat.id
-    title = getattr(forwarded_chat, "title", None) or "—"
-
+    is_admin_there = None
+    can_post = None
     try:
         member = await context.bot.get_chat_member(channel_id, context.bot.id)
-        is_admin_there = getattr(member, "status", None) in ("administrator", "creator")
+        status = getattr(member, "status", None)
+        is_admin_there = status in ("administrator", "creator")
+        can_post = status == "creator" or getattr(member, "can_post_messages", False)
     except Exception as e:
-        logger.warning("could not verify bot admin status in channel: %s", e)
-        is_admin_there = None  # unknown — proceed but warn
+        logger.warning("sb_channel_info: could not check bot status: %s", e)
 
-    subs.set_channel_id(channel_id)
-    subs.set_channel_title(title)
+    def _yesno(v):
+        if v is None:
+            return "❓ غير معروف"
+        return "✅ نعم" if v else "❌ لا"
 
-    if is_admin_there is False:
-        warning = "\n\n⚠️ يبدو أن البوت ليس مشرفاً في هذه القناة بعد — يرجى إضافته كمشرف حتى تعمل المشاركات بشكل صحيح."
-    elif is_admin_there is None:
-        warning = "\n\n⚠️ تعذر التحقق من صلاحيات البوت في القناة — تأكد أنه مضاف كمشرف."
-    else:
-        warning = ""
-
-    await message.reply_text(
-        f"✅ تم ربط قناة المشاركات: *{title}*{warning}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_hub_kb(),
+    text = (
+        f"ℹ️ *معلومات القناة*\n\n"
+        f"📺 الاسم: *{subs.get_channel_title()}*\n"
+        f"🆔 المعرف: `{channel_id}`\n"
+        f"📅 تاريخ الربط: {_fmt_date(subs.get_channel_linked_at())}\n"
+        f"👮 البوت مشرف؟ {_yesno(is_admin_there)}\n"
+        f"✉️ يستطيع إرسال الرسائل؟ {_yesno(can_post)}"
     )
-    return SB_HUB
+    await _reply(update, text, InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="sb_channel")]]))
+    return SB_CHANNEL_MENU
+
+
+async def sb_channel_unlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if not subs.is_channel_configured():
+        return await _show_channel_menu(update, context)
+    await _reply(
+        update,
+        f"🗑 هل أنت متأكد من إلغاء ربط قناة *{subs.get_channel_title()}*؟",
+        _yn("sb_channel_unlink_yes", "sb_channel"),
+    )
+    return SB_CHANNEL_UNLINK_CONFIRM
+
+
+async def sb_channel_unlink_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("✅ تم إلغاء ربط القناة.")
+    subs.unlink_channel()
+    return await _show_channel_menu(update, context)
 
 
 # ── Submissions list ─────────────────────────────────────────────────────────
@@ -886,7 +919,117 @@ async def sb_fin_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return SB_HUB
 
 
-# ── Channel moderation buttons (⭐/🏆/❌/🗑 on each channel post) ────────────
+# ── /link command — the ONLY way to link a channel ──────────────────────────
+#
+# Registered as a standalone CommandHandler in main.py (NOT part of this
+# file's ConversationHandler) because it's posted INSIDE the channel itself,
+# entirely outside any per-chat conversation state — exactly like the
+# ⭐/🏆/❌/🗑 moderation buttons below. Never relies on forwarding a message
+# or on typing a chat id by hand: the channel post itself IS the discovery
+# mechanism (its chat id is read directly from the update).
+#
+# Security note: Telegram channel posts normally do not carry the poster's
+# identity to bots (channel_post.from_user is typically None) — but only a
+# channel's admins/owner can post to it at all, so the mere existence of a
+# /link post already implies the sender has posting rights there. When
+# Telegram DOES provide from_user (it sometimes does), we additionally
+# require that user to be a recognized bot admin. The REPLACE confirmation
+# step below is always identity-checked reliably, since callback_query taps
+# always carry a real from_user even inside a channel.
+
+async def handle_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not chat or chat.type != "channel":
+        return  # /link only means something posted inside a channel
+
+    sender = message.from_user if message else None
+    if sender is not None and not _is_admin(sender.id):
+        # We could identify the poster AND they're not an authorized admin.
+        return
+
+    try:
+        member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        bot_is_admin = getattr(member, "status", None) in ("administrator", "creator")
+    except Exception as e:
+        logger.warning("handle_link_command: could not verify bot admin status: %s", e)
+        bot_is_admin = False
+    if not bot_is_admin:
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="⚠️ يجب إضافة البوت كمشرف (Admin) في هذه القناة أولاً قبل تنفيذ /link.",
+            )
+        except Exception:
+            pass
+        return
+
+    current_id = subs.get_channel_id()
+    if current_id and str(current_id) != str(chat.id):
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ نعم", callback_data=f"sblink_replace_yes_{chat.id}"),
+            InlineKeyboardButton("❌ لا", callback_data="sblink_replace_no"),
+        ]])
+        context.bot_data[f"sblink_pending_title_{chat.id}"] = chat.title or "—"
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"⚠️ توجد قناة مرتبطة بالفعل: *{subs.get_channel_title()}*.\n\nهل تريد استبدالها بهذه القناة؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb,
+        )
+        return
+
+    await _finish_link(context, chat.id, chat.title or "—", notify_user_id=sender.id if sender else None)
+
+
+async def _finish_link(context: ContextTypes.DEFAULT_TYPE, channel_id, title: str, notify_user_id=None):
+    subs.link_channel(channel_id, title)
+    try:
+        await context.bot.send_message(chat_id=channel_id, text="✅ تم ربط هذه القناة بنظام المشاركات بنجاح.")
+    except Exception as e:
+        logger.warning("_finish_link: could not post confirmation in channel: %s", e)
+    if notify_user_id:
+        try:
+            await context.bot.send_message(
+                chat_id=notify_user_id,
+                text=(
+                    "✅ تم ربط قناة المشاركات بنجاح.\n\n"
+                    f"اسم القناة:\n{title}\n\n"
+                    f"معرف القناة:\n{channel_id}"
+                ),
+            )
+        except Exception as e:
+            logger.warning("_finish_link: could not DM admin: %s", e)
+
+
+async def sblink_replace_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    channel_id = query.data.replace("sblink_replace_yes_", "")
+    title = context.bot_data.pop(f"sblink_pending_title_{channel_id}", None) or query.message.chat.title or "—"
+    await query.answer("✅ جارٍ الاستبدال...")
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await _finish_link(context, channel_id, title, notify_user_id=query.from_user.id)
+
+
+async def sblink_replace_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    await query.answer("تم الإلغاء.")
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+
+# ── Channel moderation buttons (⭐/🏆/❌/🗑 على كل مشاركة في القناة) ────────
 #
 # These are registered as plain global CallbackQueryHandlers in main.py (NOT
 # part of this file's ConversationHandler) because they're attached to
@@ -1036,8 +1179,15 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_finalize, pattern="^sb_finalize$"),
                 CallbackQueryHandler(sb_channel,  pattern="^sb_channel$"),
             ],
-            SB_CHANNEL_SETUP: [
-                MessageHandler(filters.ALL & ~filters.COMMAND, sb_channel_capture),
+            SB_CHANNEL_MENU: [
+                CallbackQueryHandler(sb_channel_info,   pattern="^sb_channel_info$"),
+                CallbackQueryHandler(sb_channel_unlink, pattern="^sb_channel_unlink$"),
+                CallbackQueryHandler(sb_channel,        pattern="^sb_channel$"),
+                hub_reentry,
+            ],
+            SB_CHANNEL_UNLINK_CONFIRM: [
+                CallbackQueryHandler(sb_channel_unlink_yes, pattern="^sb_channel_unlink_yes$"),
+                CallbackQueryHandler(sb_channel,            pattern="^sb_channel$"),
                 hub_reentry,
             ],
             SB_LIST: [

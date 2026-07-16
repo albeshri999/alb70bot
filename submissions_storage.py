@@ -61,39 +61,50 @@ def _save_json(filepath: str, data) -> None:
 
 
 # ── Settings (📺 قناة المشاركات) ─────────────────────────────────────────────
+#
+# Linking is done entirely via the /link command sent INSIDE the channel
+# itself (see submissions_admin.handle_link_command) — never by forwarding a
+# message or typing a chat id by hand.
 
 def load_settings() -> dict:
     return _load_json(SETTINGS_FILE, {})
 
 
 def get_channel_id():
-    """The linked private channel's chat id (int-like string), or None if
-    not configured yet."""
+    """The linked channel's chat id, or None if not configured yet."""
     return load_settings().get("channel_id")
-
-
-def set_channel_id(channel_id) -> None:
-    settings = load_settings()
-    settings["channel_id"] = channel_id
-    _save_json(SETTINGS_FILE, settings)
 
 
 def get_channel_title():
     return load_settings().get("channel_title")
 
 
-def set_channel_title(title: str) -> None:
-    settings = load_settings()
-    settings["channel_title"] = title
-    _save_json(SETTINGS_FILE, settings)
+def get_channel_linked_at():
+    return load_settings().get("channel_linked_at")
 
 
 def is_channel_configured() -> bool:
     return get_channel_id() is not None
 
 
+def link_channel(channel_id, title: str) -> None:
+    settings = load_settings()
+    settings["channel_id"] = channel_id
+    settings["channel_title"] = title or "—"
+    settings["channel_linked_at"] = datetime.utcnow().isoformat()
+    _save_json(SETTINGS_FILE, settings)
+
+
+def unlink_channel() -> None:
+    settings = load_settings()
+    settings.pop("channel_id", None)
+    settings.pop("channel_title", None)
+    settings.pop("channel_linked_at", None)
+    _save_json(SETTINGS_FILE, settings)
+
+
 def channel_message_link(channel_id, message_id) -> str:
-    """Deep link to a specific message inside a private channel
+    """Deep link to a specific message inside the channel
     (https://t.me/c/<internal_id>/<message_id>) — works for anyone who is
     already a member of that channel, exactly like tapping the message."""
     cid = str(channel_id)
