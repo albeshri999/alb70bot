@@ -62,9 +62,10 @@ def _save_json(filepath: str, data) -> None:
 
 # ── Settings (📺 قناة المشاركات) ─────────────────────────────────────────────
 #
-# Linking is done entirely via the /link command sent INSIDE the channel
-# itself (see submissions_admin.handle_link_command) — never by forwarding a
-# message or typing a chat id by hand.
+# Linking is done entirely via Telegram's native Request Chat API
+# (KeyboardButtonRequestChat — see submissions_admin.sb_channel_request /
+# sb_channel_shared) — never by forwarding a message, a /link command, or
+# typing a chat id by hand.
 
 def load_settings() -> dict:
     return _load_json(SETTINGS_FILE, {})

@@ -26,7 +26,10 @@ style, for consistency with the rest of the bot):
 import logging
 from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, KeyboardButtonRequestChat, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+)
 from telegram.ext import (
     ContextTypes, ConversationHandler,
     MessageHandler, CallbackQueryHandler, filters,
@@ -52,7 +55,8 @@ logger = logging.getLogger(__name__)
  SB_ENTRIES_LIST, SB_ENTRY_DETAIL, SB_ENTRY_SCORE,
  SB_FINALIZE_LIST, SB_FINALIZE_CONFIRM,
  SB_CHANNEL_MENU, SB_CHANNEL_UNLINK_CONFIRM,
- ) = range(29)
+ SB_CHANNEL_AWAIT_SHARE, SB_CHANNEL_REPLACE_CONFIRM,
+ ) = range(31)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -120,20 +124,26 @@ async def sb_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SB_HUB
 
 
-# ── Channel setup ("📺 ربط قناة المشاركات") ────────────────────────────────
+# ── Channel setup ("📺 ربط قناة المشاركات") — Telegram Request Chat API ─────
 #
-# Linking itself happens via handle_link_command() below (a standalone
-# function, NOT part of this ConversationHandler — it fires on a /link
-# command posted INSIDE the channel, registered globally in main.py,
-# exactly like the ⭐/🏆/❌/🗑 channel moderation buttons already do for
-# entries). This section only shows status/info/unlink screens from the
-# normal admin menu.
+# The ONLY way to link a channel: tapping "📲 اختيار قناة" opens Telegram's
+# own native chat picker (KeyboardButtonRequestChat) restricted to channels
+# where the admin themself has admin rights and where our bot is already a
+# member. Telegram sends back the chosen chat's id (and title, since we set
+# request_title=True) automatically — no forwarding, no /link command, and
+# no manual chat-id entry anywhere in this flow.
+
+CHANNEL_REQUEST_ID = 1
+
 
 def _channel_menu_kb() -> InlineKeyboardMarkup:
     rows = []
     if subs.is_channel_configured():
         rows.append([InlineKeyboardButton("ℹ️ معلومات القناة", callback_data="sb_channel_info")])
+        rows.append([InlineKeyboardButton("📲 ربط قناة أخرى", callback_data="sb_channel_request")])
         rows.append([InlineKeyboardButton("🗑 إلغاء ربط القناة", callback_data="sb_channel_unlink")])
+    else:
+        rows.append([InlineKeyboardButton("📲 ربط قناة المشاركات", callback_data="sb_channel_request")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="sb_hub")])
     return InlineKeyboardMarkup(rows)
 
@@ -142,20 +152,14 @@ async def _show_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if subs.is_channel_configured():
         text = (
             f"📺 *قناة المشاركات*\n\n"
-            f"القناة المرتبطة حالياً: *{subs.get_channel_title()}*\n\n"
-            "لربط قناة مختلفة، نفّذ نفس خطوات الربط داخل القناة الجديدة "
-            "(سيُطلب منك تأكيد الاستبدال)."
+            f"القناة المرتبطة حالياً: *{subs.get_channel_title()}*"
         )
     else:
         text = (
             "📺 *ربط قناة المشاركات*\n\n"
-            "الخطوات:\n\n"
             "1️⃣ أنشئ قناة خاصة أو عامة.\n"
-            "2️⃣ أضف البوت كمشرف (Admin) مع صلاحية إرسال الرسائل.\n"
-            "3️⃣ ادخل إلى القناة.\n"
-            "4️⃣ أرسل الرسالة التالية داخل القناة:\n\n"
-            "`/link`\n\n"
-            "بعد ذلك سيقوم البوت باكتشاف القناة وربطها تلقائياً."
+            "2️⃣ أضف البوت كمشرف (Admin) فيها مع صلاحية إرسال الرسائل.\n"
+            "3️⃣ اضغط الزر أدناه واختر القناة من نافذة تيليجرام."
         )
     await _reply(update, text, _channel_menu_kb())
     return SB_CHANNEL_MENU
@@ -163,6 +167,102 @@ async def _show_channel_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def sb_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    return await _show_channel_menu(update, context)
+
+
+async def sb_channel_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the special 'طلب قناة' reply-keyboard button — Telegram's own
+    Request Chat API. Must be a regular (bottom) keyboard, not inline, since
+    KeyboardButtonRequestChat only exists on plain KeyboardButton."""
+    await update.callback_query.answer()
+    request_chat = KeyboardButtonRequestChat(
+        request_id=CHANNEL_REQUEST_ID,
+        chat_is_channel=True,
+        bot_is_member=True,
+        request_title=True,
+    )
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📲 اختيار قناة", request_chat=request_chat)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await update.callback_query.message.reply_text(
+        "اضغط الزر أدناه لاختيار قناة المشاركات:", reply_markup=kb,
+    )
+    return SB_CHANNEL_AWAIT_SHARE
+
+
+async def sb_channel_shared(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fires when the admin picks a channel from Telegram's native picker
+    (a service message carrying `chat_shared`) — the chat id and title
+    arrive directly from Telegram, never typed or forwarded."""
+    shared = update.message.chat_shared
+    if not shared or shared.request_id != CHANNEL_REQUEST_ID:
+        return SB_CHANNEL_AWAIT_SHARE
+
+    channel_id = shared.chat_id
+    title = getattr(shared, "title", None)
+
+    await update.message.reply_text("⏳ جارٍ التحقق من القناة...", reply_markup=ReplyKeyboardRemove())
+
+    try:
+        member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        bot_is_admin = getattr(member, "status", None) in ("administrator", "creator")
+    except Exception as e:
+        logger.warning("sb_channel_shared: could not verify bot admin status: %s", e)
+        bot_is_admin = False
+
+    if not bot_is_admin:
+        await update.message.reply_text(
+            "⚠️ البوت ليس مشرفاً في هذه القناة بعد.\n\n"
+            "أضف البوت كمشرف (Admin) في القناة أولاً ثم أعد المحاولة.",
+            reply_markup=_hub_kb(),
+        )
+        return SB_HUB
+
+    if not title:
+        try:
+            chat = await context.bot.get_chat(channel_id)
+            title = chat.title
+        except Exception as e:
+            logger.warning("sb_channel_shared: could not fetch channel title: %s", e)
+            title = "—"
+
+    current_id = subs.get_channel_id()
+    if current_id and str(current_id) != str(channel_id):
+        context.user_data["sb_pending_channel"] = (channel_id, title)
+        await update.message.reply_text(
+            f"⚠️ توجد قناة مرتبطة بالفعل: *{subs.get_channel_title()}*.\n\n"
+            "هل تريد استبدالها بهذه القناة؟",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_yn("sb_channel_replace_yes", "sb_channel_replace_no"),
+        )
+        return SB_CHANNEL_REPLACE_CONFIRM
+
+    subs.link_channel(channel_id, title)
+    await update.message.reply_text(
+        f"✅ تم ربط قناة المشاركات بنجاح.\n\nاسم القناة:\n{title}\n\nمعرف القناة:\n{channel_id}",
+        reply_markup=_hub_kb(),
+    )
+    return SB_HUB
+
+
+async def sb_channel_replace_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    channel_id, title = context.user_data.pop("sb_pending_channel", (None, None))
+    if not channel_id:
+        return await _show_channel_menu(update, context)
+    subs.link_channel(channel_id, title)
+    await _reply(
+        update,
+        f"✅ تم ربط قناة المشاركات بنجاح.\n\nاسم القناة:\n{title}\n\nمعرف القناة:\n{channel_id}",
+        _hub_kb(),
+    )
+    return SB_HUB
+
+
+async def sb_channel_replace_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("تم الإلغاء.")
+    context.user_data.pop("sb_pending_channel", None)
     return await _show_channel_menu(update, context)
 
 
@@ -919,116 +1019,6 @@ async def sb_fin_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return SB_HUB
 
 
-# ── /link command — the ONLY way to link a channel ──────────────────────────
-#
-# Registered as a standalone CommandHandler in main.py (NOT part of this
-# file's ConversationHandler) because it's posted INSIDE the channel itself,
-# entirely outside any per-chat conversation state — exactly like the
-# ⭐/🏆/❌/🗑 moderation buttons below. Never relies on forwarding a message
-# or on typing a chat id by hand: the channel post itself IS the discovery
-# mechanism (its chat id is read directly from the update).
-#
-# Security note: Telegram channel posts normally do not carry the poster's
-# identity to bots (channel_post.from_user is typically None) — but only a
-# channel's admins/owner can post to it at all, so the mere existence of a
-# /link post already implies the sender has posting rights there. When
-# Telegram DOES provide from_user (it sometimes does), we additionally
-# require that user to be a recognized bot admin. The REPLACE confirmation
-# step below is always identity-checked reliably, since callback_query taps
-# always carry a real from_user even inside a channel.
-
-async def handle_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    chat = update.effective_chat
-    if not chat or chat.type != "channel":
-        return  # /link only means something posted inside a channel
-
-    sender = message.from_user if message else None
-    if sender is not None and not _is_admin(sender.id):
-        # We could identify the poster AND they're not an authorized admin.
-        return
-
-    try:
-        member = await context.bot.get_chat_member(chat.id, context.bot.id)
-        bot_is_admin = getattr(member, "status", None) in ("administrator", "creator")
-    except Exception as e:
-        logger.warning("handle_link_command: could not verify bot admin status: %s", e)
-        bot_is_admin = False
-    if not bot_is_admin:
-        try:
-            await context.bot.send_message(
-                chat_id=chat.id,
-                text="⚠️ يجب إضافة البوت كمشرف (Admin) في هذه القناة أولاً قبل تنفيذ /link.",
-            )
-        except Exception:
-            pass
-        return
-
-    current_id = subs.get_channel_id()
-    if current_id and str(current_id) != str(chat.id):
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ نعم", callback_data=f"sblink_replace_yes_{chat.id}"),
-            InlineKeyboardButton("❌ لا", callback_data="sblink_replace_no"),
-        ]])
-        context.bot_data[f"sblink_pending_title_{chat.id}"] = chat.title or "—"
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=f"⚠️ توجد قناة مرتبطة بالفعل: *{subs.get_channel_title()}*.\n\nهل تريد استبدالها بهذه القناة؟",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb,
-        )
-        return
-
-    await _finish_link(context, chat.id, chat.title or "—", notify_user_id=sender.id if sender else None)
-
-
-async def _finish_link(context: ContextTypes.DEFAULT_TYPE, channel_id, title: str, notify_user_id=None):
-    subs.link_channel(channel_id, title)
-    try:
-        await context.bot.send_message(chat_id=channel_id, text="✅ تم ربط هذه القناة بنظام المشاركات بنجاح.")
-    except Exception as e:
-        logger.warning("_finish_link: could not post confirmation in channel: %s", e)
-    if notify_user_id:
-        try:
-            await context.bot.send_message(
-                chat_id=notify_user_id,
-                text=(
-                    "✅ تم ربط قناة المشاركات بنجاح.\n\n"
-                    f"اسم القناة:\n{title}\n\n"
-                    f"معرف القناة:\n{channel_id}"
-                ),
-            )
-        except Exception as e:
-            logger.warning("_finish_link: could not DM admin: %s", e)
-
-
-async def sblink_replace_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not _is_admin(query.from_user.id):
-        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
-        return
-    channel_id = query.data.replace("sblink_replace_yes_", "")
-    title = context.bot_data.pop(f"sblink_pending_title_{channel_id}", None) or query.message.chat.title or "—"
-    await query.answer("✅ جارٍ الاستبدال...")
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    await _finish_link(context, channel_id, title, notify_user_id=query.from_user.id)
-
-
-async def sblink_replace_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not _is_admin(query.from_user.id):
-        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
-        return
-    await query.answer("تم الإلغاء.")
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-
-
 # ── Channel moderation buttons (⭐/🏆/❌/🗑 على كل مشاركة في القناة) ────────
 #
 # These are registered as plain global CallbackQueryHandlers in main.py (NOT
@@ -1180,14 +1170,24 @@ def build_submissions_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(sb_channel,  pattern="^sb_channel$"),
             ],
             SB_CHANNEL_MENU: [
-                CallbackQueryHandler(sb_channel_info,   pattern="^sb_channel_info$"),
-                CallbackQueryHandler(sb_channel_unlink, pattern="^sb_channel_unlink$"),
-                CallbackQueryHandler(sb_channel,        pattern="^sb_channel$"),
+                CallbackQueryHandler(sb_channel_info,    pattern="^sb_channel_info$"),
+                CallbackQueryHandler(sb_channel_request, pattern="^sb_channel_request$"),
+                CallbackQueryHandler(sb_channel_unlink,  pattern="^sb_channel_unlink$"),
+                CallbackQueryHandler(sb_channel,         pattern="^sb_channel$"),
                 hub_reentry,
             ],
             SB_CHANNEL_UNLINK_CONFIRM: [
                 CallbackQueryHandler(sb_channel_unlink_yes, pattern="^sb_channel_unlink_yes$"),
                 CallbackQueryHandler(sb_channel,            pattern="^sb_channel$"),
+                hub_reentry,
+            ],
+            SB_CHANNEL_AWAIT_SHARE: [
+                MessageHandler(filters.StatusUpdate.CHAT_SHARED, sb_channel_shared),
+                hub_reentry,
+            ],
+            SB_CHANNEL_REPLACE_CONFIRM: [
+                CallbackQueryHandler(sb_channel_replace_yes, pattern="^sb_channel_replace_yes$"),
+                CallbackQueryHandler(sb_channel_replace_no,  pattern="^sb_channel_replace_no$"),
                 hub_reentry,
             ],
             SB_LIST: [
