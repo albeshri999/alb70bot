@@ -29,11 +29,27 @@ jobs:
           scp scripts/deploy.sh root@185.193.66.70:/root/deploy.sh
 
       - name: Execute Deploy
+        id: deploy
+        continue-on-error: true
         run: |
           ssh root@185.193.66.70 "chmod +x /root/deploy.sh && /root/deploy.sh"
 
+      - name: Download Error Log
+        if: steps.deploy.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          scp root@185.193.66.70:/tmp/deploy_error.log deploy_error.log || true
+
+      - name: Show Error Log
+        if: steps.deploy.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          if [ -f deploy_error.log ]; then
+            cat deploy_error.log
+          fi
+
       - name: Telegram Success
-        if: success()
+        if: steps.deploy.outcome == 'success'
         run: |
           curl -s \
           -X POST \
@@ -42,10 +58,14 @@ jobs:
           --data-urlencode "text=✅ Deploy Success"
 
       - name: Telegram Failed
-        if: failure()
+        if: steps.deploy.outcome == 'failure'
         run: |
           curl -s \
           -X POST \
           "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
           --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
           --data-urlencode "text=❌ Deploy Failed"
+
+      - name: Fail Workflow
+        if: steps.deploy.outcome == 'failure'
+        run: exit 1
