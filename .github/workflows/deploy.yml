@@ -1,21 +1,85 @@
-- name: Telegram Success
-  if: success()
-  run: |
-    MESSAGE="✅ تم نشر البوت بنجاح
+name: Deploy Bot
 
-📦 المستودع:
-${{ github.repository }}
+on:
+  push:
+    branches:
+      - main
 
-🌿 الفرع:
-${{ github.ref_name }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
 
-👤 المنفذ:
-${{ github.actor }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Add Host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh root@185.193.66.70 << 'EOF'
+
+          set -e
+
+          cd /root/alb70bot
+
+          echo "========== Git Pull =========="
+          git pull
+
+          echo "========== Python Syntax =========="
+          python3 -m compileall .
+
+          echo "========== Restart =========="
+          systemctl restart alb70bot
+
+          echo "Waiting..."
+          sleep 3
+
+          echo "========== Status =========="
+          systemctl status alb70bot --no-pager
+
+          EOF
+
+      - name: Telegram Success
+        if: success()
+        run: |
+          curl -s \
+            -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=✅ تم نشر البوت بنجاح
+
+📦 المستودع: ${{ github.repository }}
+
+🌿 الفرع: ${{ github.ref_name }}
+
+👤 المنفذ: ${{ github.actor }}
 
 📝 Commit:
 ${{ github.sha }}"
 
-    curl -s -X POST \
-      "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-      -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-      --data-urlencode text="$MESSAGE"
+      - name: Telegram Failed
+        if: failure()
+        run: |
+          curl -s \
+            -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=❌ فشل نشر البوت
+
+📦 المستودع: ${{ github.repository }}
+
+🌿 الفرع: ${{ github.ref_name }}
+
+👤 المنفذ: ${{ github.actor }}
+
+📝 Commit:
+${{ github.sha }}"
