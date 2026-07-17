@@ -1,38 +1,53 @@
 #!/bin/bash
 
-set -e
+set -Eeuo pipefail
 
 PROJECT="/root/alb70bot"
 BACKUP="/root/backups"
-LOG="/tmp/deploy_error.log"
-
-rm -f "$LOG"
-
-exec > >(tee -a "$LOG") 2>&1
-
-echo "=================================="
-echo "Deploy Started"
-echo "=================================="
+SERVICE="alb70bot"
 
 mkdir -p "$BACKUP"
+
+on_error() {
+    echo ""
+    echo "=============================="
+    echo "DEPLOY FAILED"
+    echo "=============================="
+
+    echo ""
+    echo "Service status:"
+    systemctl --no-pager --full status "$SERVICE" || true
+
+    echo ""
+    echo "Last 50 log lines:"
+    journalctl -u "$SERVICE" -n 50 --no-pager || true
+
+    exit 1
+}
+
+trap on_error ERR
+
+echo "=============================="
+echo "Deploy Started"
+echo "=============================="
 
 echo ""
 echo "Creating backup..."
 
-FILE="$BACKUP/alb70bot-$(date +%Y%m%d-%H%M%S).tar.gz"
+BACKUP_FILE="$BACKUP/alb70bot-$(date +%Y%m%d-%H%M%S).tar.gz"
 
-tar -czf "$FILE" "$PROJECT"
+tar -czf "$BACKUP_FILE" "$PROJECT"
+
+echo "Backup:"
+echo "$BACKUP_FILE"
 
 echo ""
-echo "Backup created"
-
-echo ""
-echo "Deleting old backups..."
+echo "Removing old backups..."
 
 ls -1t "$BACKUP"/alb70bot-*.tar.gz | tail -n +11 | xargs -r rm -f
 
 echo ""
-echo "Current backups"
+echo "Current backups:"
 
 ls -lh "$BACKUP"
 
@@ -59,23 +74,25 @@ if [ -f requirements.txt ]; then
 fi
 
 echo ""
-echo "Checking Python..."
+echo "Python compile..."
 
 python3 -m compileall .
 
 echo ""
-echo "Restarting bot..."
+echo "Restarting service..."
 
-systemctl restart alb70bot
+systemctl restart "$SERVICE"
 
 sleep 3
 
 echo ""
 echo "Checking service..."
 
-systemctl --no-pager --full status alb70bot
+systemctl is-active --quiet "$SERVICE"
+
+systemctl --no-pager --full status "$SERVICE"
 
 echo ""
-echo "=================================="
-echo "Deploy Finished Successfully"
-echo "=================================="
+echo "=============================="
+echo "DEPLOY SUCCESS"
+echo "=============================="
