@@ -113,6 +113,7 @@ def _main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📢 الإذاعة",                callback_data="adm_broadcast")],
         [InlineKeyboardButton("🏆 لوحة الشرف",             callback_data="adm_leaderboard")],
         [InlineKeyboardButton("👮 إعدادات المشرفين",       callback_data="adm_admins")],
+        [InlineKeyboardButton("🖥 إدارة السيرفر",          callback_data="adm_server")],
     ])
 
 
@@ -2351,11 +2352,11 @@ def build_admin_handler() -> ConversationHandler:
                 CallbackQueryHandler(cb_broadcast,     pattern="^adm_broadcast$"),
                 CallbackQueryHandler(cb_leaderboard,   pattern="^adm_leaderboard$"),
                 # NOTE: adm_quizzes / adm_distro / adm_initiatives / adm_submissions /
-                # adm_admins are intentionally NOT handled here — they fall through
-                # untouched to their own independent ConversationHandlers
+                # adm_admins / adm_server are intentionally NOT handled here — they
+                # fall through untouched to their own independent ConversationHandlers
                 # (quiz_admin.py / distro_admin.py / initiatives_admin.py /
-                # submissions_admin.py / admin_settings.py), exactly as before
-                # this reorganization.
+                # submissions_admin.py / admin_settings.py / server_admin.py),
+                # exactly as before this reorganization.
             ],
             # ── Participants & stats submenu ("📊 المشاركون والإحصائيات")
             PART_STATS_MENU: [

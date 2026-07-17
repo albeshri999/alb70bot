@@ -38,6 +38,7 @@ from submissions_admin import (
     chsb_delete, chsb_delete_yes,
     chsb_cancel,
 )
+from server_admin import build_server_admin_handler
 from submissions_user import (
     handle_menu_submissions, handle_submission_view, handle_submission_start,
     handle_submission_media,
@@ -97,6 +98,10 @@ def main() -> None:
 
     # Submissions — fully independent ConversationHandler (🎭 إدارة المشاركات)
     app.add_handler(build_submissions_admin_handler())
+
+    # Server management — fully independent ConversationHandler, ADMIN_ID only
+    # (🖥 إدارة السيرفر)
+    app.add_handler(build_server_admin_handler())
 
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
