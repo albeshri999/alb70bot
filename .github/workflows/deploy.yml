@@ -5,8 +5,6 @@ on:
     branches:
       - main
 
-  workflow_dispatch:
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -20,30 +18,44 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add Server to Known Hosts
+      - name: Add Host
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
 
-      - name: Deploy to Server
+      - name: Deploy
         run: |
           ssh root@185.193.66.70 << 'EOF'
           cd /root/alb70bot
 
-          echo "⬇️ Pulling latest version..."
+          echo "📥 Pull..."
           git pull
 
-          echo "🐍 Checking Python syntax..."
+          echo "🐍 Checking Python..."
           python3 -m compileall .
 
-          echo "🔄 Restarting bot..."
+          echo "🔄 Restart..."
           systemctl restart alb70bot
 
-          echo "⏳ Waiting..."
           sleep 3
 
-          echo "📋 Bot status:"
           systemctl status alb70bot --no-pager
-
-          echo "✅ Deployment completed."
           EOF
+
+      - name: Telegram Success
+        if: success()
+        run: |
+          curl -s \
+          -X POST \
+          https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -d text="✅ تم نشر البوت بنجاح%0Aالمستودع: ${{ github.repository }}%0Aالفرع: ${{ github.ref_name }}%0Aالمنفذ: ${{ github.actor }}"
+
+      - name: Telegram Failed
+        if: failure()
+        run: |
+          curl -s \
+          -X POST \
+          https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -d text="❌ فشل نشر البوت%0Aراجع GitHub Actions"
