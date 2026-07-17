@@ -1,24 +1,17 @@
-name: Deploy Bot
+name: Test
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: SSH Deploy
-        uses: appleboy/ssh-action@master
-
-        with:
-          host: 185.193.66.70
-          username: root
-          key: ${{ secrets.SSH_KEY }}
-
-          script: |
-            cd /root/alb70bot
-            git pull
-            systemctl restart alb70bot
+      - name: Check Secret
+        run: |
+          if [ -z "${{ secrets.SSH_KEY }}" ]; then
+            echo "SECRET IS EMPTY"
+          else
+            echo "SECRET EXISTS"
+          fi
