@@ -1,17 +1,32 @@
-name: Test
+name: Deploy Bot
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-  test:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check Secret
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Add Host
         run: |
-          if [ -z "${{ secrets.SSH_KEY }}" ]; then
-            echo "SECRET IS EMPTY"
-          else
-            echo "SECRET EXISTS"
-          fi
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh root@185.193.66.70 "
+            cd /root/alb70bot &&
+            git pull &&
+            systemctl restart alb70bot
+          "
