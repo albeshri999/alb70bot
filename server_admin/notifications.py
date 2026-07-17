@@ -35,19 +35,44 @@ if not _audit_logger.handlers:
     _audit_logger.propagate = False
 
 
-def log_action(update: Update, title: str, duration: float, success: bool) -> None:
+def log_action(update: Update, title: str, duration: float, success: bool, **extra_fields) -> None:
+    """Rule #10 — every action is logged with time (added automatically by
+    the FileHandler's formatter), admin name, Telegram ID, action, duration,
+    and result. `extra_fields` lets specific actions (like the ZIP update
+    pipeline) additionally log file name/size/entry count etc. without
+    changing this function's core contract for every other caller."""
     user = update.effective_user
     admin_name = user.full_name if user else "—"
     admin_id = user.id if user else "—"
     result = "SUCCESS" if success else "FAILED"
+    extra_str = "".join(f" | {k}={v}" for k, v in extra_fields.items())
     _audit_logger.info(
-        "admin=%s | id=%s | action=%s | duration=%.2fs | result=%s",
-        admin_name, admin_id, title, duration, result,
+        "admin=%s | id=%s | action=%s | duration=%.2fs | result=%s%s",
+        admin_name, admin_id, title, duration, result, extra_str,
     )
 
 
 # ── Concurrency guard (rule #11) ────────────────────────────────────────────
 _busy_lock = None
+
+
+def get_recent_log_entries(matching_titles=None, limit: int = 10) -> list:
+    """Returns the most recent `limit` audit-log lines, optionally filtered
+    to only those whose 'action=' field is one of `matching_titles` — used
+    by '📦 سجل آخر التحديثات' to show only update-related history without
+    needing a second, separate history store."""
+    if not os.path.exists(LOG_FILE_PATH):
+        return []
+    try:
+        with open(LOG_FILE_PATH, "r", encoding="utf-8") as f:
+            lines = [line.rstrip("\n") for line in f if line.strip()]
+    except Exception as e:
+        logger.warning("get_recent_log_entries: failed to read log: %s", e)
+        return []
+
+    if matching_titles:
+        lines = [line for line in lines if any(f"action={t}" in line for t in matching_titles)]
+    return lines[-limit:]
 
 
 def get_lock() -> asyncio.Lock:

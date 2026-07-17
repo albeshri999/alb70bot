@@ -27,12 +27,13 @@ functions and renders the menus.
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
+from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler, MessageHandler, filters
 
 from server_admin.utils import (
     is_owner, reply, NO_PERMISSION_TEXT,
     SRV_MENU, SRV_CONFIRM, SRV_BACKUP_LIST, SRV_BACKUP_ITEM, SRV_BACKUP_CONFIRM,
     SRV_STATUS_MENU, SRV_LOGS_MENU, SRV_MAINT_MENU, SRV_DL_MENU,
+    SRV_UPDATE_MENU, SRV_UPDATE_AWAIT_ZIP, SRV_UPDATE_ZIP_REVIEW,
 )
 from server_admin.notifications import execute_with_progress, execute_download
 
@@ -47,6 +48,11 @@ from server_admin.backup import (
     srv_backup_list_show, srv_backup_item,
     srv_backup_restore_confirm, srv_backup_restore_yes,
     srv_backup_delete_confirm, srv_backup_delete_yes,
+)
+from server_admin.zip_update import (
+    GITHUB_DEPLOY_TITLE,
+    srv_update_menu, srv_update_history, srv_update_zip_start, srv_update_zip_receive,
+    srv_zip_list, srv_zip_cancel, srv_zip_install,
 )
 
 
@@ -70,7 +76,7 @@ ACTION_FUNCS = {
 }
 
 ACTION_TITLES = {
-    "srv_deploy":          "🚀 نشر تحديث",
+    "srv_deploy":          GITHUB_DEPLOY_TITLE,
     "srv_rollback":        "↩️ استرجاع آخر نسخة",
     "srv_restart":         "🔄 إعادة تشغيل البوت",
     "srv_stop":            "⛔ إيقاف الخدمة",
@@ -106,8 +112,7 @@ DOWNLOAD_TITLES = {
 
 def _menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 نشر تحديث", callback_data="srv_deploy")],
-        [InlineKeyboardButton("↩️ استرجاع آخر نسخة", callback_data="srv_rollback")],
+        [InlineKeyboardButton("🚀 إدارة التحديثات", callback_data="srv_update_menu")],
         [InlineKeyboardButton("⚡ حالة وتحكم الخدمة", callback_data="srv_page_status")],
         [InlineKeyboardButton("📜 السجلات", callback_data="srv_page_logs")],
         [InlineKeyboardButton("💾 النسخ الاحتياطية", callback_data="srv_list_backups")],
@@ -311,12 +316,28 @@ def build_server_admin_handler() -> ConversationHandler:
         entry_points=[CallbackQueryHandler(srv_hub, pattern="^adm_server$")],
         states={
             SRV_MENU: [
+                CallbackQueryHandler(srv_update_menu, pattern="^srv_update_menu$"),
                 CallbackQueryHandler(srv_page_status, pattern="^srv_page_status$"),
                 CallbackQueryHandler(srv_page_logs, pattern="^srv_page_logs$"),
                 CallbackQueryHandler(srv_page_maint, pattern="^srv_page_maint$"),
                 CallbackQueryHandler(srv_page_downloads, pattern="^srv_page_downloads$"),
                 CallbackQueryHandler(srv_backup_list_show, pattern="^srv_list_backups$"),
                 *action_handlers,
+            ],
+            SRV_UPDATE_MENU: [
+                CallbackQueryHandler(srv_update_menu, pattern="^srv_update_menu$"),
+                CallbackQueryHandler(srv_update_zip_start, pattern="^srv_update_zip_start$"),
+                CallbackQueryHandler(srv_update_history, pattern="^srv_update_history$"),
+                *action_handlers,
+            ],
+            SRV_UPDATE_AWAIT_ZIP: [
+                CallbackQueryHandler(srv_update_menu, pattern="^srv_update_menu$"),
+                MessageHandler(filters.Document.ALL, srv_update_zip_receive),
+            ],
+            SRV_UPDATE_ZIP_REVIEW: [
+                CallbackQueryHandler(srv_zip_install, pattern="^srv_zip_install$"),
+                CallbackQueryHandler(srv_zip_list, pattern="^srv_zip_list$"),
+                CallbackQueryHandler(srv_zip_cancel, pattern="^srv_zip_cancel$"),
             ],
             SRV_STATUS_MENU: [
                 CallbackQueryHandler(srv_page_status, pattern="^srv_page_status$"),

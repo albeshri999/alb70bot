@@ -18,7 +18,7 @@ from server_admin.rollback import act_rollback
 
 def act_pip_update():
     # Rule #14 — automatic backup before touching anything.
-    backup_ok, backup_out = create_backup_archive(prefix="auto")
+    backup_ok, backup_out, _backup_path = create_backup_archive(prefix="auto")
     if not backup_ok:
         return False, (
             "❌ فشل إنشاء نسخة احتياطية تلقائية قبل التحديث — تم إلغاء تحديث "

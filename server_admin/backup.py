@@ -26,7 +26,8 @@ from server_admin.rollback import act_restore_backup
 # ── Plain actions (routed through the generic execute_with_progress) ───────
 
 def act_backup():
-    return create_backup_archive(prefix="manual")
+    ok, report, _path = create_backup_archive(prefix="manual")
+    return ok, report
 
 
 def act_cleanup():

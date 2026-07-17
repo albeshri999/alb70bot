@@ -34,7 +34,8 @@ NO_PERMISSION_TEXT = "🚫 ليس لديك صلاحية."
 # them. menu.py builds the actual ConversationHandler; backup.py's handlers
 # just need to return the correct state constant when they finish.
 (SRV_MENU, SRV_CONFIRM, SRV_BACKUP_LIST, SRV_BACKUP_ITEM, SRV_BACKUP_CONFIRM,
- SRV_STATUS_MENU, SRV_LOGS_MENU, SRV_MAINT_MENU, SRV_DL_MENU) = range(9)
+ SRV_STATUS_MENU, SRV_LOGS_MENU, SRV_MAINT_MENU, SRV_DL_MENU,
+ SRV_UPDATE_MENU, SRV_UPDATE_AWAIT_ZIP, SRV_UPDATE_ZIP_REVIEW) = range(12)
 
 
 def is_owner(user_id) -> bool:
@@ -119,11 +120,16 @@ def list_backup_files() -> list:
 def create_backup_archive(prefix: str = "manual"):
     """Creates one backup archive of BOT_DIR under BACKUPS_DIR. `prefix`
     distinguishes manually-requested backups ('manual-...') from the
-    automatic ones rule #14 requires before every deploy/update
-    ('auto-...') — both show up together in the backup browser."""
+    automatic ones the update pipelines create before touching anything
+    ('auto-...', 'zipupdate-...') — all show up together in the backup
+    browser. Returns (success, report_text, archive_path_or_None) — the
+    path lets callers reliably restore THIS EXACT backup later if a
+    following step fails, instead of having to guess/parse it back out of
+    text output."""
     try:
         os.makedirs(BACKUPS_DIR, exist_ok=True)
     except Exception as e:
-        return False, f"⚠️ تعذر إنشاء مجلد النسخ الاحتياطية:\n{e}"
+        return False, f"⚠️ تعذر إنشاء مجلد النسخ الاحتياطية:\n{e}", None
     archive_path = os.path.join(BACKUPS_DIR, f"{prefix}-{timestamp()}.tar.gz")
-    return run_command(["tar", "-czf", archive_path, BOT_DIR])
+    ok, report = run_command(["tar", "-czf", archive_path, BOT_DIR])
+    return ok, report, (archive_path if ok else None)
