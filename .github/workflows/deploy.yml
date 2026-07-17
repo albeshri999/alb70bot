@@ -63,38 +63,38 @@ jobs:
 
           EOF
 
-      - name: Telegram Success
+            - name: Telegram Success
         if: success()
+        env:
+          MESSAGE: |
+            ✅ تم نشر البوت بنجاح
+
+            📦 المستودع: ${{ github.repository }}
+            🌿 الفرع: ${{ github.ref_name }}
+            👤 المنفذ: ${{ github.actor }}
+            📝 Commit:
+            ${{ github.sha }}
         run: |
           curl -s \
             -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
             --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=✅ تم نشر البوت بنجاح
+            --data-urlencode "text=${MESSAGE}"
 
-📦 المستودع: ${{ github.repository }}
-
-🌿 الفرع: ${{ github.ref_name }}
-
-👤 المنفذ: ${{ github.actor }}
-
-📝 Commit:
-${{ github.sha }}"
-
-      - name: Telegram Failed
+            - name: Telegram Failed
         if: failure()
+        env:
+          MESSAGE: |
+            ❌ فشل نشر البوت
+
+            📦 المستودع: ${{ github.repository }}
+            🌿 الفرع: ${{ github.ref_name }}
+            👤 المنفذ: ${{ github.actor }}
+            📝 Commit:
+            ${{ github.sha }}
         run: |
           curl -s \
             -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
             --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=❌ فشل نشر البوت
-
-📦 المستودع: ${{ github.repository }}
-
-🌿 الفرع: ${{ github.ref_name }}
-
-👤 المنفذ: ${{ github.actor }}
-
-📝 Commit:
-${{ github.sha }}"
+            --data-urlencode "text=${MESSAGE}"
