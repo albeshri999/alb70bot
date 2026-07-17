@@ -5,6 +5,8 @@ on:
     branches:
       - main
 
+  workflow_dispatch:
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -18,15 +20,30 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add Host
+      - name: Add Server to Known Hosts
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
 
-      - name: Deploy
+      - name: Deploy to Server
         run: |
-          ssh root@185.193.66.70 "
-            cd /root/alb70bot &&
-            git pull &&
-            systemctl restart alb70bot
-          "
+          ssh root@185.193.66.70 << 'EOF'
+          cd /root/alb70bot
+
+          echo "⬇️ Pulling latest version..."
+          git pull
+
+          echo "🐍 Checking Python syntax..."
+          python3 -m compileall .
+
+          echo "🔄 Restarting bot..."
+          systemctl restart alb70bot
+
+          echo "⏳ Waiting..."
+          sleep 3
+
+          echo "📋 Bot status:"
+          systemctl status alb70bot --no-pager
+
+          echo "✅ Deployment completed."
+          EOF
