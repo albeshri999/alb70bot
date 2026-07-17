@@ -2355,7 +2355,7 @@ def build_admin_handler() -> ConversationHandler:
                 # adm_admins / adm_server are intentionally NOT handled here — they
                 # fall through untouched to their own independent ConversationHandlers
                 # (quiz_admin.py / distro_admin.py / initiatives_admin.py /
-                # submissions_admin.py / admin_settings.py / server_admin.py),
+                # submissions_admin.py / admin_settings.py / server_admin/ package),
                 # exactly as before this reorganization.
             ],
             # ── Participants & stats submenu ("📊 المشاركون والإحصائيات")

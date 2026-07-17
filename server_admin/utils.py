@@ -20,8 +20,8 @@ from config import ADMIN_ID
 BOT_DIR         = "/root/alb70bot"
 SERVICE_NAME    = "alb70bot"
 BACKUPS_DIR     = "/root/backups"
-DEPLOY_SCRIPT   = "/root/deploy.sh"
-ROLLBACK_SCRIPT = "/root/rollback.sh"
+DEPLOY_SCRIPT   = "/root/alb70bot/scripts/deploy.sh"
+ROLLBACK_SCRIPT = "/root/alb70bot/scripts/rollback.sh"
 KEEP_BACKUPS    = 10
 COMMAND_TIMEOUT = 120  # every subprocess call uses this — no exceptions
 
@@ -33,7 +33,8 @@ NO_PERMISSION_TEXT = "🚫 ليس لديك صلاحية."
 # share the exact same state values without any circular import between
 # them. menu.py builds the actual ConversationHandler; backup.py's handlers
 # just need to return the correct state constant when they finish.
-(SRV_MENU, SRV_CONFIRM, SRV_BACKUP_LIST, SRV_BACKUP_ITEM, SRV_BACKUP_CONFIRM) = range(5)
+(SRV_MENU, SRV_CONFIRM, SRV_BACKUP_LIST, SRV_BACKUP_ITEM, SRV_BACKUP_CONFIRM,
+ SRV_STATUS_MENU, SRV_LOGS_MENU, SRV_MAINT_MENU, SRV_DL_MENU) = range(9)
 
 
 def is_owner(user_id) -> bool:

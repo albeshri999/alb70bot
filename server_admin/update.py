@@ -28,7 +28,7 @@ def act_pip_update():
     # Needs an actual shell (source + &&), so this is the one action that
     # uses shell=True — still via subprocess.run(), never os.system().
     cmd = f"cd {BOT_DIR} && source venv/bin/activate && pip install -r requirements.txt"
-    pip_ok, pip_out = run_command(cmd, shell=True)
+    pip_ok, pip_out = run_command(cmd, timeout=300, shell=True)
 
     # Restart so the new libraries actually take effect, then health-check —
     # otherwise "did the update work?" would be unanswerable.

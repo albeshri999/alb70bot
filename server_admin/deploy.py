@@ -1,40 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-server_admin.deploy — 🚀 نشر آخر تحديث.
+server_admin.deploy — 🚀 نشر تحديث.
 
-Implements rules #14 and #15 of the production charter:
-  #14 — every update automatically creates a backup FIRST.
-  #15 — if the update fails (script error OR the service doesn't come back
-        up healthy), it automatically rolls back and reports the outcome
-        of that rollback too.
+/root/alb70bot/scripts/deploy.sh already does its own backup (before
+touching anything), git pull, pip install, compileall, restart, and an
+internal health check (`systemctl is-active --quiet`) that makes the whole
+script exit non-zero on failure — so this module does NOT create a second,
+redundant backup (that would just waste time/disk and produce two
+differently-named backups for one deploy). What this module adds on top:
+  - its OWN health check right after, as a second independent confirmation,
+  - automatic rollback if the script failed OR the service isn't healthy,
+    with the rollback's own outcome included in the report (production
+    charter rule: "any failed update must roll back automatically").
 """
-from server_admin.utils import run_command, create_backup_archive, DEPLOY_SCRIPT
+from server_admin.utils import run_command, DEPLOY_SCRIPT
 from server_admin.health import check_service_health
 from server_admin.rollback import act_rollback
 
+# deploy.sh runs git pull + pip install + compileall + restart — needs more
+# room than the default 120s.
+DEPLOY_TIMEOUT = 300
+
 
 def act_deploy():
-    # Rule #14 — automatic backup before touching anything.
-    backup_ok, backup_out = create_backup_archive(prefix="auto")
-    if not backup_ok:
-        return False, (
-            "❌ فشل إنشاء نسخة احتياطية تلقائية قبل النشر — تم إلغاء عملية "
-            f"النشر لحماية النظام (لن يُنفَّذ Deploy بدون نسخة احتياطية ناجحة).\n\n{backup_out}"
-        )
-
-    deploy_ok, deploy_out = run_command([DEPLOY_SCRIPT])
+    deploy_ok, deploy_out = run_command([DEPLOY_SCRIPT], timeout=DEPLOY_TIMEOUT)
     health_ok, health_out = check_service_health()
 
     report = (
-        f"── نسخة احتياطية تلقائية قبل النشر ──\n{backup_out}\n\n"
-        f"── تنفيذ النشر ──\n{deploy_out}\n\n"
+        f"── تنفيذ النشر (deploy.sh) ──\n{deploy_out}\n\n"
         f"── فحص الحالة بعد النشر (Health Check) ──\n{health_out}"
     )
 
     if deploy_ok and health_ok:
         return True, report
 
-    # Rule #15 — the update failed (or the service isn't healthy) → auto-rollback.
+    # The update failed (or the service isn't healthy) → auto-rollback.
     report += "\n\n⚠️ فشل النشر أو الخدمة لا تعمل بعده — سيتم التراجع (Rollback) تلقائياً..."
     rollback_ok, rollback_out = act_rollback()
     report += f"\n\n── Rollback تلقائي ──\n{rollback_out}"

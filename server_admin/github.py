@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-server_admin.github — 🌿 Git Status / ⬇ Git Pull / 📜 آخر 10 Commits.
+server_admin.github — read-only Git diagnostics (branch, last commit, recent
+history). Per the project's philosophy that GitHub is just a version
+repository — not a daily-use tool — there is deliberately NO "git pull"
+action here: scripts/deploy.sh already pulls the latest code as part of a
+proper deploy (backup → pull → install → restart → health-check). Exposing
+a bare "git pull" separately would create a second, less-safe code-update
+path with no backup/restart/health-check around it, which is exactly the
+kind of redundant/confusing control the panel should avoid.
 """
 from server_admin.utils import run_command, BOT_DIR
 
@@ -13,10 +20,6 @@ def act_git_status():
     commit_hash = hash_out.splitlines()[0] if hash_out else "—"
     header = f"🌿 الفرع الحالي: {branch}\n🔖 آخر Commit: {commit_hash}\n\n"
     return ok, header + out
-
-
-def act_git_pull():
-    return run_command(["git", "pull"], cwd=BOT_DIR)
 
 
 def act_git_log():
