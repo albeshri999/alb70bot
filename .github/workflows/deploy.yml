@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+
   workflow_dispatch:
 
 jobs:
@@ -11,99 +12,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      - name: Start SSH Agent
-        uses: webfactory/ssh-agent@v0.9.0
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add server to known_hosts
+      - name: Add Host
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
 
-      - name: Deploy
+      - name: Upload Script
         run: |
-          ssh root@185.193.66.70 << 'EOF'
-          set -e
+          scp scripts/deploy.sh root@185.193.66.70:/root/deploy.sh
 
-          echo "===== Backup ====="
-          mkdir -p /root/backups
-          tar -czf /root/backups/alb70bot-$(date +%Y%m%d-%H%M%S).tar.gz /root/alb70bot
-
-          echo "===== Enter Project ====="
-          cd /root/alb70bot
-
-          echo "===== Git Pull ====="
-          git pull origin main
-
-          echo "===== Activate Virtualenv ====="
-          source venv/bin/activate
-
-          echo "===== Install Requirements ====="
-          pip install -r requirements.txt
-
-          echo "===== Python Syntax Check ====="
-          python3 -m compileall .
-
-          echo "===== Restart Service ====="
-          systemctl restart alb70bot
-
-          echo "===== Waiting ====="
-          sleep 3
-
-          echo "===== Service Status ====="
-          systemctl --no-pager --full status alb70bot
-
-          echo "===== Deploy Finished ====="
-          EOF
+      - name: Execute Deploy
+        run: |
+          ssh root@185.193.66.70 "chmod +x /root/deploy.sh && /root/deploy.sh"
 
       - name: Telegram Success
         if: success()
-        env:
-          MESSAGE: |
-            ✅ تم نشر البوت بنجاح
-
-            📦 المستودع:
-            ${{ github.repository }}
-
-            🌿 الفرع:
-            ${{ github.ref_name }}
-
-            👤 المنفذ:
-            ${{ github.actor }}
-
-            📝 Commit:
-            ${{ github.sha }}
         run: |
           curl -s \
-            -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=${MESSAGE}"
+          -X POST \
+          "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+          --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+          --data-urlencode "text=✅ Deploy Success"
 
       - name: Telegram Failed
         if: failure()
-        env:
-          MESSAGE: |
-            ❌ فشل نشر البوت
-
-            📦 المستودع:
-            ${{ github.repository }}
-
-            🌿 الفرع:
-            ${{ github.ref_name }}
-
-            👤 المنفذ:
-            ${{ github.actor }}
-
-            📝 Commit:
-            ${{ github.sha }}
         run: |
           curl -s \
-            -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=${MESSAGE}"
+          -X POST \
+          "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+          --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+          --data-urlencode "text=❌ Deploy Failed"
