@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 jobs:
@@ -12,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Start SSH Agent
@@ -20,7 +19,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add Server to known_hosts
+      - name: Add server to known_hosts
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
@@ -28,50 +27,54 @@ jobs:
       - name: Deploy
         run: |
           ssh root@185.193.66.70 << 'EOF'
-
           set -e
 
-          echo "📦 Creating backup..."
+          echo "===== Backup ====="
           mkdir -p /root/backups
           tar -czf /root/backups/alb70bot-$(date +%Y%m%d-%H%M%S).tar.gz /root/alb70bot
 
-          echo "📂 Enter project..."
+          echo "===== Enter Project ====="
           cd /root/alb70bot
 
-          echo "⬇️ Pull latest code..."
+          echo "===== Git Pull ====="
           git pull origin main
 
-          echo "🐍 Activate virtual environment..."
+          echo "===== Activate Virtualenv ====="
           source venv/bin/activate
 
-          echo "📦 Install dependencies..."
+          echo "===== Install Requirements ====="
           pip install -r requirements.txt
 
-          echo "🧪 Check Python syntax..."
+          echo "===== Python Syntax Check ====="
           python3 -m compileall .
 
-          echo "🔄 Restart service..."
+          echo "===== Restart Service ====="
           systemctl restart alb70bot
 
-          echo "⏳ Waiting..."
+          echo "===== Waiting ====="
           sleep 3
 
-          echo "📋 Service status..."
+          echo "===== Service Status ====="
           systemctl --no-pager --full status alb70bot
 
-          echo "✅ Deployment completed."
-
+          echo "===== Deploy Finished ====="
           EOF
 
-            - name: Telegram Success
+      - name: Telegram Success
         if: success()
         env:
           MESSAGE: |
             ✅ تم نشر البوت بنجاح
 
-            📦 المستودع: ${{ github.repository }}
-            🌿 الفرع: ${{ github.ref_name }}
-            👤 المنفذ: ${{ github.actor }}
+            📦 المستودع:
+            ${{ github.repository }}
+
+            🌿 الفرع:
+            ${{ github.ref_name }}
+
+            👤 المنفذ:
+            ${{ github.actor }}
+
             📝 Commit:
             ${{ github.sha }}
         run: |
@@ -81,15 +84,21 @@ jobs:
             --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             --data-urlencode "text=${MESSAGE}"
 
-            - name: Telegram Failed
+      - name: Telegram Failed
         if: failure()
         env:
           MESSAGE: |
             ❌ فشل نشر البوت
 
-            📦 المستودع: ${{ github.repository }}
-            🌿 الفرع: ${{ github.ref_name }}
-            👤 المنفذ: ${{ github.actor }}
+            📦 المستودع:
+            ${{ github.repository }}
+
+            🌿 الفرع:
+            ${{ github.ref_name }}
+
+            👤 المنفذ:
+            ${{ github.actor }}
+
             📝 Commit:
             ${{ github.sha }}
         run: |
