@@ -430,6 +430,19 @@ def set_entry_score(submission_id, user_id, score) -> None:
     save_entries(entries)
 
 
+def clear_entry_score(submission_id, user_id) -> None:
+    """🗑 حذف الدرجة — removes the score and reverts the entry back to
+    '🟡 بانتظار التقييم' (it's no longer 'scored' once its score is gone)."""
+    entries = load_entries()
+    key, uid = str(submission_id), str(user_id)
+    for e in entries:
+        if str(e.get("submission_id")) == key and str(e.get("user_id")) == uid:
+            e["score"] = None
+            e["status"] = ENTRY_STATUS_SUBMITTED
+            break
+    save_entries(entries)
+
+
 def set_entry_status(submission_id, user_id, status: str) -> None:
     """Low-level setter — prefer approve_entry()/reject_entry() below for
     the confirm-gated moderation actions."""

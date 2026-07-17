@@ -32,7 +32,7 @@ from initiatives_user import (
 from achievements_user import handle_menu_achievements
 from submissions_admin import (
     build_submissions_admin_handler,
-    chsb_score, chsb_score_dm_value,
+    chsb_score, chsb_scoreeditopen, chsb_scoreback, chsb_scoreval, chsb_scoredel,
     chsb_approve, chsb_approve_yes,
     chsb_reject, chsb_reject_yes,
     chsb_delete, chsb_delete_yes,
@@ -67,6 +67,10 @@ def main() -> None:
     # — registered early since they're attached to channel messages, entirely
     # outside any ConversationHandler's per-chat state.
     app.add_handler(CallbackQueryHandler(chsb_score,   pattern=r"^chsb_score_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_scoreeditopen, pattern=r"^chsb_scoreeditopen_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_scoreback,     pattern=r"^chsb_scoreback_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_scoreval,      pattern=r"^chsb_scoreval_\d+_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(chsb_scoredel,      pattern=r"^chsb_scoredel_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(chsb_approve, pattern=r"^chsb_approve_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(chsb_approve_yes, pattern=r"^chsb_approve_yes_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(chsb_reject,  pattern=r"^chsb_reject_\d+_\d+$"))
@@ -158,16 +162,6 @@ def main() -> None:
         filters.VOICE | filters.AUDIO | filters.VIDEO | filters.PHOTO,
         handle_submission_media,
     ))
-
-    # Submissions — admin's DM reply after tapping '⭐ تقييم' on a channel
-    # post. Registered in an EARLIER group (-1) than the word-competition's
-    # text handler below (group 0 / default) — python-telegram-bot runs one
-    # handler per group per update, so both get a chance at the same text
-    # message. This handler is a strict no-op unless that exact admin has a
-    # pending score request, in which case it raises ApplicationHandlerStop
-    # so the word-competition handler never also treats the score number as
-    # a word-guess answer.
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chsb_score_dm_value), group=-1)
 
     # General text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

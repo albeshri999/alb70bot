@@ -33,7 +33,6 @@ from telegram import (
 from telegram.ext import (
     ContextTypes, ConversationHandler,
     MessageHandler, CallbackQueryHandler, filters,
-    ApplicationHandlerStop,
 )
 from telegram.constants import ParseMode
 
@@ -1151,9 +1150,6 @@ async def sb_fin_confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # immediately on the first tap), and every status change is written by
 # EDITING the same channel card (caption + buttons) — never a new message.
 
-CHSB_PENDING_SCORE_KEY = "chsb_pending_score"  # (submission_id, user_id) tuple
-
-
 def _parse_chsb_payload(data: str, prefix: str):
     payload = data.replace(prefix, "")
     submission_id, user_id = payload.split("_", 1)
@@ -1178,6 +1174,30 @@ def _channel_confirm_kb(kind: str, submission_id, user_id) -> InlineKeyboardMark
     ]])
 
 
+def _score_grid_kb(submission_id, user_id, max_score: int) -> InlineKeyboardMarkup:
+    """All scores from max_score down to 0, in one screen (no pagination),
+    laid out in even rows of 10 for a clean tappable grid — exactly as
+    requested, entirely inside the channel."""
+    scores = list(range(int(max_score), -1, -1))
+    row_width = 10
+    rows = [
+        [InlineKeyboardButton(str(s), callback_data=f"chsb_scoreval_{submission_id}_{user_id}_{s}")
+         for s in scores[i:i + row_width]]
+        for i in range(0, len(scores), row_width)
+    ]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"chsb_scoreback_{submission_id}_{user_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _score_manage_kb(submission_id, user_id) -> InlineKeyboardMarkup:
+    """Shown instead of the grid when the entry already has a score."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تعديل الدرجة", callback_data=f"chsb_scoreeditopen_{submission_id}_{user_id}")],
+        [InlineKeyboardButton("🗑 حذف الدرجة", callback_data=f"chsb_scoredel_{submission_id}_{user_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"chsb_scoreback_{submission_id}_{user_id}")],
+    ])
+
+
 async def _update_channel_card(context, submission_id, user_id, keyboard=None):
     """Edits the SAME channel message's caption (and optionally its
     keyboard) to reflect the entry's current status — never sends a new
@@ -1196,63 +1216,93 @@ async def _update_channel_card(context, submission_id, user_id, keyboard=None):
         logger.warning("_update_channel_card failed for %s/%s: %s", submission_id, user_id, e)
 
 
+async def _set_channel_keyboard(query, keyboard):
+    """Swaps just the reply keyboard on the tapped channel message, keeping
+    its caption untouched — used for grid/back/manage-score navigation
+    steps that don't change the entry's data."""
+    try:
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+    except Exception as e:
+        logger.warning("_set_channel_keyboard failed: %s", e)
+
+
 async def chsb_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """⭐ تقييم — entirely inside the channel, no DM. If the entry isn't
+    scored yet, opens the 0..max_score grid directly. If it already has a
+    score, shows the manage-score panel (✏️ تعديل / 🗑 حذف / 🔙 رجوع) instead,
+    since the current score is already visible in the card's caption."""
     query = update.callback_query
     if not _is_admin(query.from_user.id):
         await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
     submission_id, user_id = _parse_chsb_payload(query.data, "chsb_score_")
     submission = subs.get_submission(submission_id)
+    entry = subs.get_entry(submission_id, user_id)
+    if not submission or not entry:
+        await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
+        return
+    await query.answer()
+    if entry.get("score") is not None:
+        await _set_channel_keyboard(query, _score_manage_kb(submission_id, user_id))
+    else:
+        await _set_channel_keyboard(query, _score_grid_kb(submission_id, user_id, submission.get("max_score", 100)))
+
+
+async def chsb_scoreeditopen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✏️ تعديل الدرجة — opens the same 0..max_score grid to pick a new value."""
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_scoreeditopen_")
+    submission = subs.get_submission(submission_id)
     if not submission:
         await query.answer("⚠️ لم يعد بالإمكان العثور على هذه المشاركة.", show_alert=True)
         return
-    context.user_data[CHSB_PENDING_SCORE_KEY] = (submission_id, user_id)
     await query.answer()
-    try:
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=f"📝 أرسل الآن درجة هذه المشاركة (من {submission.get('max_score', 100)}):",
-        )
-    except Exception as e:
-        logger.warning("chsb_score DM prompt failed: %s", e)
-        await query.answer("⚠️ افتح محادثة خاصة مع البوت أولاً (اضغط /start) ثم حاول مجدداً.", show_alert=True)
+    await _set_channel_keyboard(query, _score_grid_kb(submission_id, user_id, submission.get("max_score", 100)))
 
 
-async def chsb_score_dm_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Registered in an earlier handler GROUP than the word-competition's
-    general text handler (see main.py) — a strict no-op (returns normally,
-    letting that group run as usual) unless this exact admin just tapped
-    '⭐ تقييم' on a channel post and is now expected to type the score in
-    this private chat. Whenever it DOES consume the message, it raises
-    ApplicationHandlerStop so the word-competition handler never also
-    tries to interpret the score number as a word-guess answer."""
-    pending = context.user_data.get(CHSB_PENDING_SCORE_KEY)
-    if not pending:
+async def chsb_scoreback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔙 رجوع from the grid or the manage-score panel — restores the normal
+    4-button card keyboard without changing anything."""
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
-    submission_id, user_id = pending
-    submission = subs.get_submission(submission_id)
-    if not submission:
-        context.user_data.pop(CHSB_PENDING_SCORE_KEY, None)
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_scoreback_")
+    await query.answer()
+    await _set_channel_keyboard(query, _channel_action_kb(submission_id, user_id))
+
+
+async def chsb_scoreval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A number tapped on the grid — saves it immediately (no separate
+    confirm step, per the request), updates the SAME card's caption to show
+    '⭐ الدرجة: X / max' and status '⭐ تم التقييم', and restores the normal
+    action keyboard."""
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
         return
-    max_score = submission.get("max_score", 100)
-
-    text = update.message.text.strip()
-    try:
-        score = float(text)
-    except ValueError:
-        await update.message.reply_text(f"⚠️ الرجاء إدخال رقم صحيح بين 0 و {max_score}.")
-        raise ApplicationHandlerStop
-    if score < 0 or score > max_score:
-        await update.message.reply_text(f"⚠️ الدرجة يجب أن تكون بين 0 و {max_score}.")
-        raise ApplicationHandlerStop
-    if score == int(score):
-        score = int(score)
-
+    payload = query.data.replace("chsb_scoreval_", "")
+    submission_id, user_id, score_str = payload.split("_", 2)
+    score = int(score_str)
     subs.set_entry_score(submission_id, user_id, score)  # always → ⭐ تم التقييم
-    context.user_data.pop(CHSB_PENDING_SCORE_KEY, None)
+    await query.answer(f"✅ تم تسجيل الدرجة: {score}")
     await _update_channel_card(context, submission_id, user_id, _channel_action_kb(submission_id, user_id))
-    await update.message.reply_text(f"✅ تم تسجيل الدرجة: *{score}* من *{max_score}*", parse_mode=ParseMode.MARKDOWN)
-    raise ApplicationHandlerStop
+
+
+async def chsb_scoredel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🗑 حذف الدرجة — clears the score, reverting the card to
+    '🟡 بانتظار التقييم'."""
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("⛔ هذا الإجراء للمشرفين فقط.", show_alert=True)
+        return
+    submission_id, user_id = _parse_chsb_payload(query.data, "chsb_scoredel_")
+    subs.clear_entry_score(submission_id, user_id)
+    await query.answer("🗑 تم حذف الدرجة.")
+    await _update_channel_card(context, submission_id, user_id, _channel_action_kb(submission_id, user_id))
 
 
 async def chsb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
