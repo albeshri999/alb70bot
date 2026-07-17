@@ -51,20 +51,21 @@ jobs:
       - name: Telegram Failed
         if: steps.deploy.outcome == 'failure'
         run: |
-          if [ -f deploy_error.log ]; then
-            TEXT=$(tail -c 3500 deploy_error.log)
-          else
-            TEXT="Deploy failed - deploy_error.log not found"
-          fi
-
           curl -s \
             -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
             --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            --data-urlencode "text=❌ Deploy Failed
+            --data-urlencode "text=❌ Deploy Failed"
 
-$TEXT"
+          if [ -f deploy_error.log ]; then
+            curl -s \
+              -X POST \
+              "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendDocument" \
+              -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -F document=@deploy_error.log
+          fi
 
       - name: Fail Workflow
         if: steps.deploy.outcome == 'failure'
-        run: exit 1
+        run: |
+          exit 1
