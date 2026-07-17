@@ -54,13 +54,13 @@ jobs:
           if [ -f deploy_error.log ]; then
             TEXT=$(tail -c 3500 deploy_error.log)
           else
-            TEXT="Deploy failed ولم يتم العثور على deploy_error.log"
+            TEXT="Deploy failed - deploy_error.log not found"
           fi
 
           curl -s \
             -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID}" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
             --data-urlencode "text=❌ Deploy Failed
 
 $TEXT"
