@@ -1,0 +1,44 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Add Host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 185.193.66.70 >> ~/.ssh/known_hosts
+
+      - name: Upload Rollback Script
+        run: |
+          scp scripts/rollback.sh root@185.193.66.70:/root/rollback.sh
+
+      - name: Execute Rollback
+        run: |
+          ssh root@185.193.66.70 "chmod +x /root/rollback.sh && /root/rollback.sh"
+
+      - name: Telegram Success
+        if: success()
+        run: |
+          curl -s \
+            -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=✅ Rollback Completed Successfully"
+
+      - name: Telegram Failed
+        if: failure()
+        run: |
+          curl -s \
+            -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data-urlencode "text=❌ Rollback Failed"
