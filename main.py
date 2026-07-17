@@ -43,8 +43,6 @@ from submissions_user import (
     handle_menu_submissions, handle_submission_view, handle_submission_start,
     handle_submission_media,
 )
-from words_admin import build_words_admin_handler
-from words_user import handle_menu_words, handle_words_day_pick
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -105,9 +103,6 @@ def main() -> None:
     # (🖥 إدارة السيرفر)
     app.add_handler(build_server_admin_handler())
 
-    # Words — fully independent ConversationHandler (📖 إدارة الكلمات)
-    app.add_handler(build_words_admin_handler())
-
     # Regular user commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("participants", participants))
@@ -150,10 +145,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_submissions,  pattern="^menu_submissions$"))
     app.add_handler(CallbackQueryHandler(handle_submission_view,   pattern=r"^sb_view_\w+$"))
     app.add_handler(CallbackQueryHandler(handle_submission_start,  pattern=r"^sb_submit_\w+$"))
-
-    # Words — participant-facing (🎤 إلقاء الكلمات), fully independent
-    app.add_handler(CallbackQueryHandler(handle_menu_words,     pattern="^menu_words$"))
-    app.add_handler(CallbackQueryHandler(handle_words_day_pick, pattern=r"^wduser_day_\w+$"))
 
     # Hint button
     app.add_handler(CallbackQueryHandler(handle_hint, pattern="^hint_reveal$"))

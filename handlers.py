@@ -65,12 +65,6 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
     except Exception:
         pass
     rows.append([InlineKeyboardButton("🏅 إنجازاتي", callback_data="menu_achievements")])
-    try:
-        from words_storage import any_announcement_open
-        if any_announcement_open():
-            rows.append([InlineKeyboardButton("🎤 إلقاء الكلمات", callback_data="menu_words")])
-    except Exception:
-        pass
     return InlineKeyboardMarkup(rows)
 
 
