@@ -1,0 +1,24 @@
+name: Deploy Bot
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH Deploy
+        uses: appleboy/ssh-action@master
+
+        with:
+          host: 185.193.66.70
+          username: root
+          key: ${{ secrets.SSH_KEY }}
+
+          script: |
+            cd /root/alb70bot
+            git pull
+            systemctl restart alb70bot
