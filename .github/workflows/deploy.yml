@@ -26,36 +26,75 @@ jobs:
       - name: Deploy
         run: |
           ssh root@185.193.66.70 << 'EOF'
+
+          set -e
+
           cd /root/alb70bot
 
-          echo "📥 Pull..."
+          echo "===================================="
+          echo "Pull latest version"
+          echo "===================================="
+
           git pull
 
-          echo "🐍 Checking Python..."
+          echo "===================================="
+          echo "Checking Python syntax"
+          echo "===================================="
+
           python3 -m compileall .
 
-          echo "🔄 Restart..."
+          echo "===================================="
+          echo "Restarting bot"
+          echo "===================================="
+
           systemctl restart alb70bot
 
           sleep 3
 
+          echo "===================================="
+          echo "Bot status"
+          echo "===================================="
+
           systemctl status alb70bot --no-pager
+
           EOF
 
       - name: Telegram Success
         if: success()
         run: |
-          curl -s \
-          -X POST \
-          https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
-          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-          -d text="✅ تم نشر البوت بنجاح%0Aالمستودع: ${{ github.repository }}%0Aالفرع: ${{ github.ref_name }}%0Aالمنفذ: ${{ github.actor }}"
+          curl -s -X POST \
+          "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          -d text="✅ تم نشر البوت بنجاح
+
+📦 المستودع:
+${{ github.repository }}
+
+🌿 الفرع:
+${{ github.ref_name }}
+
+👤 المنفذ:
+${{ github.actor }}
+
+📝 Commit:
+${{ github.sha }}"
 
       - name: Telegram Failed
         if: failure()
         run: |
-          curl -s \
-          -X POST \
-          https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
-          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-          -d text="❌ فشل نشر البوت%0Aراجع GitHub Actions"
+          LOG=$(ssh root@185.193.66.70 "journalctl -u alb70bot -n 30 --no-pager")
+
+          curl -s -X POST \
+          "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          --data-urlencode text="❌ فشل نشر البوت
+
+المستودع:
+${{ github.repository }}
+
+Commit:
+${{ github.sha }}
+
+آخر سجل:
+
+$LOG"
